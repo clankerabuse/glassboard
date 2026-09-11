@@ -1,0 +1,17 @@
+[project]
+name = "glassboard"
+version = "0.1.0"
+description = "Transparent Wayland overlay whiteboard"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+glassboard = "glassboard.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["glassboard*"]
