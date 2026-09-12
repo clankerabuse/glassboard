@@ -7,6 +7,7 @@ import cairo
 from glassboard import _gi  # noqa: F401
 from gi.repository import Gdk, GLib, Gtk, GtkLayerShell
 
+from glassboard.board import SolidBoardWindow
 from glassboard.canvas import InkBoard, Tool, brush_radius
 from glassboard.input_region import (
     apply_input_update,
@@ -50,6 +51,8 @@ class OverlayWindow(Gtk.Window):
             on_undo=self._undo,
             on_clear=self._clear,
             on_quit=self.close,
+            on_board=self._set_board_open,
+            on_board_menu=self._set_board_menu_open,
             on_moved=self._on_toolbar_moved,
             on_drag_begin=self._on_toolbar_drag_begin,
             on_drag_end=self._on_toolbar_drag_end,
@@ -61,6 +64,7 @@ class OverlayWindow(Gtk.Window):
 
         self.add(self._overlay)
 
+        self._board = SolidBoardWindow()
         self._cursor_pos: tuple[float, float] | None = None
 
         self.add_events(
@@ -85,10 +89,15 @@ class OverlayWindow(Gtk.Window):
         self.connect("key-press-event", self._on_key_press)
         self.connect("realize", self._on_realize)
         self.connect("map-event", self._on_map)
-        self.connect("destroy", Gtk.main_quit)
+        self.connect("destroy", self._on_destroy)
 
         self._toolbar_placed = False
         self._set_draw_mode(False)
+
+    def _on_destroy(self, *_args) -> None:
+        if self._board.get_realized():
+            self._board.destroy()
+        Gtk.main_quit()
 
     def _prepare_transparent_visual(self) -> None:
         screen = self.get_screen()
@@ -297,6 +306,26 @@ class OverlayWindow(Gtk.Window):
         self._refresh_input_region()
         self.queue_draw()
 
+    def _set_board_open(self, open_: bool, color: str) -> None:
+        self._board.set_color(color)
+        if open_:
+            self._board.show_all()
+            # Solid board is most useful when you can ink immediately.
+            if not self._toolbar.is_draw_mode():
+                self._toolbar.set_draw_mode(True, emit=True)
+        else:
+            self._board.hide()
+
+    def _set_board_menu_open(self, open_: bool) -> None:
+        # Popover may sit outside the toolbar hit box; accept full input
+        # while it's up so White/Black remain clickable in Click mode.
+        if open_:
+            reset_input_cache()
+            set_full_input(self)
+        else:
+            reset_input_cache()
+            self._refresh_input_region()
+
     def _refresh_input_region(self) -> None:
         schedule_input_update(
             self,
@@ -423,10 +452,17 @@ class OverlayWindow(Gtk.Window):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
 
         if key == "escape":
-            if self._toolbar.is_draw_mode():
+            if self._toolbar.is_board_open():
+                self._toolbar.set_board_open(False, emit=True)
+            elif self._toolbar.is_draw_mode():
                 self._toolbar.set_draw_mode(False, emit=True)
             else:
                 self.close()
+            return True
+        if key == "b" and not ctrl:
+            self._toolbar.set_board_open(
+                not self._toolbar.is_board_open(), emit=True
+            )
             return True
         if key == "d" and not ctrl:
             self._toolbar.set_draw_mode(not self._toolbar.is_draw_mode(), emit=True)

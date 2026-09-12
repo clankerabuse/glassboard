@@ -41,6 +41,7 @@ Then launch **Glassboard** from your app menu / launcher.
 - Floating toolbar (bottom center, drag via the **drag handle** ⠿):
   - **Click** — ink stays visible; mouse passes through to apps (toolbar still works)
   - **Draw** — drag to ink on the glass
+  - **Board** — pop up a solid board over the desktop (work area only — leaves the taskbar alone); toggle again to retract. Hover for **White** / **Black**; a plain click uses the last-used color. Opens into Draw. Shortcut: `B`. Esc retracts the board first.
   - Pen / Eraser, color swatches, stroke **size slider** (toolbar shows a live size preview for both)
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Eraser also shows a size ring around the cursor while drawing
@@ -49,8 +50,9 @@ Then launch **Glassboard** from your app menu / launcher.
   - **Drag handle** (⠿): drag to reposition the toolbar
 - Shortcuts (while Draw mode has keyboard focus):
   - `D` toggle Click/Draw
+  - `B` toggle solid Board
   - `P` pen, `E` eraser
   - `Ctrl+Z` undo, `Ctrl+Backspace` clear
-  - `Esc` back to Click (or quit if already Click)
+  - `Esc` retract Board, else back to Click (or quit if already Click)
 
 Tested against KWin Wayland with `wlr-layer-shell`.
