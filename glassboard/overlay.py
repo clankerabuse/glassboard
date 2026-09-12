@@ -316,19 +316,51 @@ class OverlayWindow(Gtk.Window):
             and oy <= y <= oy + alloc.height
         )
 
+    def _event_coords(self, event) -> tuple[float, float]:
+        """Map event position into this window's coordinate space.
+
+        The floating toolbar has its own GdkWindow. Unhandled motion from it
+        propagates to us with toolbar-local x/y; treating those as window
+        coords paints the eraser preview near the top of the screen.
+        """
+        event_win = event.get_window()
+        our_win = self.get_window()
+        x = float(event.x)
+        y = float(event.y)
+        if event_win is None or our_win is None or event_win == our_win:
+            return (x, y)
+        win = event_win
+        while win is not None and win != our_win:
+            x, y = win.coords_to_parent(x, y)
+            win = win.get_parent()
+        return (x, y)
+
+    def _set_cursor_pos(self, x: float, y: float) -> tuple[float, float] | None:
+        """Store cursor pos, or clear it while the pointer is over the toolbar."""
+        old = self._cursor_pos
+        if self._event_over_toolbar(x, y):
+            self._cursor_pos = None
+        else:
+            self._cursor_pos = (x, y)
+        return old
+
     def _on_button_press(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
-        self._cursor_pos = (event.x, event.y)
+        x, y = self._event_coords(event)
+        self._set_cursor_pos(x, y)
         if event.button != 1 or not self._ink.draw_enabled:
             return False
-        if self._event_over_toolbar(event.x, event.y):
+        if self._event_over_toolbar(x, y):
             return False
-        if self._ink.begin_stroke(event.x, event.y):
+        if self._ink.begin_stroke(x, y):
             self.queue_draw()
             return True
         return False
 
     def _on_button_release(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
-        self._cursor_pos = (event.x, event.y)
+        x, y = self._event_coords(event)
+        old = self._set_cursor_pos(x, y)
+        if self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
+            self._invalidate_cursor(old, self._cursor_pos)
         if event.button != 1:
             return False
         if self._ink.end_stroke():
@@ -337,11 +369,11 @@ class OverlayWindow(Gtk.Window):
         return False
 
     def _on_motion(self, _w: Gtk.Widget, event: Gdk.EventMotion) -> bool:
-        old = self._cursor_pos
-        self._cursor_pos = (event.x, event.y)
+        x, y = self._event_coords(event)
+        old = self._set_cursor_pos(x, y)
         handled = False
         if event.state & Gdk.ModifierType.BUTTON1_MASK:
-            if self._ink.continue_stroke(event.x, event.y):
+            if self._cursor_pos is not None and self._ink.continue_stroke(x, y):
                 self.queue_draw()
                 handled = True
         elif self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
@@ -349,9 +381,10 @@ class OverlayWindow(Gtk.Window):
         return handled
 
     def _on_enter(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
-        self._cursor_pos = (event.x, event.y)
+        x, y = self._event_coords(event)
+        old = self._set_cursor_pos(x, y)
         if self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
-            self._invalidate_cursor(self._cursor_pos)
+            self._invalidate_cursor(old, self._cursor_pos)
         return False
 
     def _on_leave(self, _w: Gtk.Widget, _event: Gdk.EventCrossing) -> bool:
@@ -363,17 +396,17 @@ class OverlayWindow(Gtk.Window):
     def _on_touch(self, _w: Gtk.Widget, event: Gdk.EventTouch) -> bool:
         if not self._ink.draw_enabled:
             return False
+        x, y = self._event_coords(event)
         if event.type == Gdk.EventType.TOUCH_BEGIN:
-            self._cursor_pos = (event.x, event.y)
-            if self._event_over_toolbar(event.x, event.y):
+            self._set_cursor_pos(x, y)
+            if self._event_over_toolbar(x, y):
                 return False
-            if self._ink.begin_stroke(event.x, event.y):
+            if self._ink.begin_stroke(x, y):
                 self.queue_draw()
                 return True
         elif event.type == Gdk.EventType.TOUCH_UPDATE:
-            old = self._cursor_pos
-            self._cursor_pos = (event.x, event.y)
-            if self._ink.continue_stroke(event.x, event.y):
+            old = self._set_cursor_pos(x, y)
+            if self._cursor_pos is not None and self._ink.continue_stroke(x, y):
                 self.queue_draw()
                 return True
             if self._ink.tool is Tool.ERASER:

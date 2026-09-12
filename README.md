@@ -24,6 +24,18 @@ pip install -e .
 glassboard
 ```
 
+### App menu (desktop entry)
+
+A `glassboard.desktop` file is included. To install it for your user:
+
+```bash
+install -Dm644 glassboard.desktop ~/.local/share/applications/glassboard.desktop
+# edit Path= in that file if the repo is not at /home/kayne/Projects/glassboard
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+```
+
+Then launch **Glassboard** from your app menu / launcher.
+
 ## Usage
 
 - Floating toolbar (bottom center, drag via the **drag handle** ⠿):
@@ -32,8 +44,9 @@ glassboard
   - Pen / Eraser, color swatches, stroke **size slider** (toolbar shows a live size preview for both)
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Eraser also shows a size ring around the cursor while drawing
+  - Eraser auto-grows while a stroke is held and moving consistently at a decent speed; pausing or slowing freezes the size (slider base is unchanged)
   - Undo, Clear, Quit
-  - **Drag handle** (⠿): drag to reposition; click (without dragging) to collapse/expand. Collapse does not change Click/Draw mode.
+  - **Drag handle** (⠿): drag to reposition the toolbar
 - Shortcuts (while Draw mode has keyboard focus):
   - `D` toggle Click/Draw
   - `P` pen, `E` eraser
