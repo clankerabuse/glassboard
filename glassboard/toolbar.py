@@ -79,7 +79,7 @@ class _SizePreview(Gtk.DrawingArea):
 
 
 class Toolbar(Gtk.EventBox):
-    """Compact floating control cluster with a collapsible drag handle."""
+    """Compact floating control cluster with a drag handle."""
 
     def __init__(
         self,
@@ -109,7 +109,6 @@ class Toolbar(Gtk.EventBox):
         self._on_drag_end = on_drag_end
         self._on_layout_changed = on_layout_changed
         self._draw_mode = False
-        self._collapsed = False
         self._tool = Tool.PEN
         self._width = WIDTH_DEFAULT
         self._color_name = "red"
@@ -126,10 +125,6 @@ class Toolbar(Gtk.EventBox):
                 border-radius: 14px;
                 border: 1px solid rgba(255, 255, 255, 0.12);
                 padding: 6px;
-            }
-            .glassboard-toolbar.collapsed {
-                padding: 4px;
-                border-radius: 12px;
             }
             .glassboard-toolbar button {
                 background: transparent;
@@ -201,10 +196,10 @@ class Toolbar(Gtk.EventBox):
         root.set_margin_bottom(2)
         self.add(root)
 
-        # Drag handle (⠿): drag to move, click to collapse/expand.
+        # Drag handle (⠿): drag to reposition the toolbar.
         self._grip = Gtk.EventBox()
         self._grip.set_visible_window(False)
-        self._grip.set_tooltip_text("Drag to move · Click to collapse")
+        self._grip.set_tooltip_text("Drag to move")
         grip_label = Gtk.Label(label="⠿")
         grip_label.get_style_context().add_class("grip")
         self._grip.add(grip_label)
@@ -219,11 +214,7 @@ class Toolbar(Gtk.EventBox):
         self._grip.connect("motion-notify-event", self._on_grip_motion)
         root.pack_start(self._grip, False, False, 0)
 
-        # Everything except the handle — hidden while retracted.
-        self._controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        root.pack_start(self._controls, False, False, 0)
-
-        self._controls.pack_start(self._sep(), False, False, 0)
+        root.pack_start(self._sep(), False, False, 0)
 
         # Mode toggle
         self._btn_click = Gtk.Button(label="Click")
@@ -231,20 +222,20 @@ class Toolbar(Gtk.EventBox):
         self._btn_draw.get_style_context().add_class("mode-draw")
         self._btn_click.connect("clicked", lambda *_: self.set_draw_mode(False, emit=True))
         self._btn_draw.connect("clicked", lambda *_: self.set_draw_mode(True, emit=True))
-        self._controls.pack_start(self._btn_click, False, False, 0)
-        self._controls.pack_start(self._btn_draw, False, False, 0)
+        root.pack_start(self._btn_click, False, False, 0)
+        root.pack_start(self._btn_draw, False, False, 0)
 
-        self._controls.pack_start(self._sep(), False, False, 0)
+        root.pack_start(self._sep(), False, False, 0)
 
         # Tools
         self._btn_pen = Gtk.Button(label="Pen")
         self._btn_eraser = Gtk.Button(label="Eraser")
         self._btn_pen.connect("clicked", lambda *_: self._select_tool(Tool.PEN))
         self._btn_eraser.connect("clicked", lambda *_: self._select_tool(Tool.ERASER))
-        self._controls.pack_start(self._btn_pen, False, False, 0)
-        self._controls.pack_start(self._btn_eraser, False, False, 0)
+        root.pack_start(self._btn_pen, False, False, 0)
+        root.pack_start(self._btn_eraser, False, False, 0)
 
-        self._controls.pack_start(self._sep(), False, False, 0)
+        root.pack_start(self._sep(), False, False, 0)
 
         # Colors
         self._swatches: dict[str, Gtk.Button] = {}
@@ -268,14 +259,14 @@ class Toolbar(Gtk.EventBox):
             btn.set_tooltip_text(name.capitalize())
             btn.connect("clicked", lambda _b, n=name: self._select_color(n))
             self._swatches[name] = btn
-            self._controls.pack_start(btn, False, False, 0)
+            root.pack_start(btn, False, False, 0)
 
-        self._controls.pack_start(self._sep(), False, False, 0)
+        root.pack_start(self._sep(), False, False, 0)
 
         # Size slider + brush/eraser preview
         self._size_preview = _SizePreview()
         self._size_preview.set_tooltip_text("Brush size")
-        self._controls.pack_start(self._size_preview, False, False, 0)
+        root.pack_start(self._size_preview, False, False, 0)
 
         adjustment = Gtk.Adjustment(
             value=WIDTH_DEFAULT,
@@ -293,9 +284,9 @@ class Toolbar(Gtk.EventBox):
         self._size_scale.set_size_request(110, -1)
         self._size_scale.set_tooltip_text("Stroke size")
         self._size_scale.connect("value-changed", self._on_size_changed)
-        self._controls.pack_start(self._size_scale, False, False, 0)
+        root.pack_start(self._size_scale, False, False, 0)
 
-        self._controls.pack_start(self._sep(), False, False, 0)
+        root.pack_start(self._sep(), False, False, 0)
 
         undo_btn = Gtk.Button(label="Undo")
         undo_btn.connect("clicked", lambda *_: on_undo())
@@ -303,9 +294,9 @@ class Toolbar(Gtk.EventBox):
         clear_btn.connect("clicked", lambda *_: on_clear())
         quit_btn = Gtk.Button(label="Quit")
         quit_btn.connect("clicked", lambda *_: on_quit())
-        self._controls.pack_start(undo_btn, False, False, 0)
-        self._controls.pack_start(clear_btn, False, False, 0)
-        self._controls.pack_start(quit_btn, False, False, 0)
+        root.pack_start(undo_btn, False, False, 0)
+        root.pack_start(clear_btn, False, False, 0)
+        root.pack_start(quit_btn, False, False, 0)
 
         self._select_tool(Tool.PEN, emit=False)
         self._select_color("red", emit=False)
@@ -339,28 +330,6 @@ class Toolbar(Gtk.EventBox):
 
     def is_draw_mode(self) -> bool:
         return self._draw_mode
-
-    def is_collapsed(self) -> bool:
-        return self._collapsed
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        if self._collapsed == collapsed:
-            return
-        self._collapsed = collapsed
-        if collapsed:
-            self._controls.hide()
-            self.get_style_context().add_class("collapsed")
-            self._grip.set_tooltip_text("Drag to move · Click to expand")
-        else:
-            self._controls.show_all()
-            self.get_style_context().remove_class("collapsed")
-            self._grip.set_tooltip_text("Drag to move · Click to collapse")
-            self._update_size_preview()
-        if self._on_layout_changed:
-            self._on_layout_changed()
-
-    def toggle_collapsed(self) -> None:
-        self.set_collapsed(not self._collapsed)
 
     def _select_tool(self, tool: Tool, *, emit: bool = True) -> None:
         self._tool = tool
@@ -441,9 +410,6 @@ class Toolbar(Gtk.EventBox):
                 self._on_moved()
             if self._on_drag_end:
                 self._on_drag_end()
-        else:
-            # Plain click — retract/expand; keep Click/Draw mode as-is.
-            self.toggle_collapsed()
         return True
 
     def _on_grip_motion(self, _w: Gtk.Widget, event: Gdk.EventMotion) -> bool:

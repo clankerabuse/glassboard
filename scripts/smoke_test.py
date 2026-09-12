@@ -51,25 +51,9 @@ def main() -> int:
                             i = 100 * stride + 100 * 4
                             assert data[i + 3] != 0
                             print("ink_ok", flush=True)
-
-                            # Buttons path: collapse keeps mode
-                            mode = win._toolbar.is_draw_mode()
-                            win._toolbar.toggle_collapsed()
-
-                            def verify_collapse() -> bool:
-                                try:
-                                    assert win._toolbar.is_collapsed()
-                                    assert win._toolbar.is_draw_mode() == mode
-                                    print("PASS", flush=True)
-                                except BaseException as exc:
-                                    print("FAIL", exc, flush=True)
-                                    errs.append(exc)
-                                finally:
-                                    win.destroy()
-                                    Gtk.main_quit()
-                                return False
-
-                            GLib.timeout_add(150, verify_collapse)
+                            print("PASS", flush=True)
+                            win.destroy()
+                            Gtk.main_quit()
                         except BaseException as exc:
                             print("FAIL", exc, flush=True)
                             errs.append(exc)
