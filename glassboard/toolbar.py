@@ -81,6 +81,86 @@ class _SizePreview(Gtk.DrawingArea):
         return False
 
 
+_BUTTON_ICON_PX = 22
+_ICON_CLICK = "input-mouse-symbolic"
+_ICON_BOARD = "video-display-symbolic"
+_ICON_PEN = "document-edit-symbolic"
+
+
+def _draw_eraser_icon(cr: cairo.Context, size: int) -> None:
+    """Draw a large diagonal eraser icon filling the square."""
+    s = size
+    stroke_w = max(1.2, s * 0.06)
+    cr.set_line_width(stroke_w)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+
+    length = s * 0.78
+    height = s * 0.44
+    split = length * 0.42  # sleeve takes the left 42%
+
+    cr.save()
+    cr.translate(s / 2, s / 2)
+    cr.rotate(-math.pi / 4)
+    cr.rectangle(-length / 2, -height / 2, length, height)
+    cr.clip()
+
+    # Pink rubber (right portion).
+    cr.set_source_rgba(0.95, 0.62, 0.68, 1.0)
+    cr.rectangle(-length / 2, -height / 2, length, height)
+    cr.fill()
+
+    # Paper sleeve (left portion).
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.9)
+    cr.rectangle(-length / 2, -height / 2, split, height)
+    cr.fill()
+
+    # Outline + sleeve split line.
+    cr.set_source_rgba(0.10, 0.10, 0.14, 1.0)
+    cr.rectangle(-length / 2, -height / 2, length, height)
+    cr.stroke()
+    cr.move_to(-length / 2 + split, -height / 2)
+    cr.line_to(-length / 2 + split, height / 2)
+    cr.stroke()
+    cr.restore()
+
+
+def _theme_icon_image(icon_name: str) -> Gtk.Image:
+    image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
+    image.set_pixel_size(_BUTTON_ICON_PX)
+    return image
+
+
+def _cairo_icon_image(draw_fn) -> Gtk.Image:
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, _BUTTON_ICON_PX, _BUTTON_ICON_PX)
+    cr = cairo.Context(surface)
+    draw_fn(cr, _BUTTON_ICON_PX)
+    pixbuf = Gdk.pixbuf_get_from_surface(surface, 0, 0, _BUTTON_ICON_PX, _BUTTON_ICON_PX)
+    return Gtk.Image.new_from_pixbuf(pixbuf)
+
+
+def _icon_button(icon_name: str, tooltip: str, css_class: str) -> Gtk.Button:
+    btn = Gtk.Button()
+    btn.set_image(_theme_icon_image(icon_name))
+    btn.set_always_show_image(True)
+    btn.set_relief(Gtk.ReliefStyle.NONE)
+    btn.set_tooltip_text(tooltip)
+    btn.get_style_context().add_class("icon-button")
+    btn.get_style_context().add_class(css_class)
+    return btn
+
+
+def _cairo_icon_button(tooltip: str, css_class: str, draw_fn) -> Gtk.Button:
+    btn = Gtk.Button()
+    btn.set_image(_cairo_icon_image(draw_fn))
+    btn.set_always_show_image(True)
+    btn.set_relief(Gtk.ReliefStyle.NONE)
+    btn.set_tooltip_text(tooltip)
+    btn.get_style_context().add_class("icon-button")
+    btn.get_style_context().add_class(css_class)
+    return btn
+
+
 class Toolbar(Gtk.EventBox):
     """Compact floating control cluster with a drag handle."""
 
@@ -142,9 +222,15 @@ class Toolbar(Gtk.EventBox):
                 border: none;
                 border-radius: 8px;
                 color: #f2f2f4;
-                padding: 4px 8px;
-                min-height: 28px;
+                padding: 2px;
+                min-width: 32px;
+                min-height: 32px;
                 font-size: 12px;
+            }
+            .glassboard-toolbar button.icon-button {
+                min-width: 36px;
+                min-height: 36px;
+                padding: 0;
             }
             .glassboard-toolbar button:hover {
                 background-color: rgba(255, 255, 255, 0.10);
@@ -152,7 +238,9 @@ class Toolbar(Gtk.EventBox):
             .glassboard-toolbar button.active {
                 background-color: rgba(255, 255, 255, 0.18);
             }
-            .glassboard-toolbar .mode-draw.active {
+            .glassboard-toolbar .mode-click.active,
+            .glassboard-toolbar .mode-pen.active,
+            .glassboard-toolbar .mode-eraser.active {
                 background-color: rgba(70, 140, 255, 0.45);
             }
             .glassboard-toolbar .mode-board.active {
@@ -255,18 +343,14 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(self._sep(), False, False, 0)
 
         # Mode toggle
-        self._btn_click = Gtk.Button(label="Click")
-        self._btn_draw = Gtk.Button(label="Draw")
-        self._btn_draw.get_style_context().add_class("mode-draw")
+        self._btn_click = _icon_button(_ICON_CLICK, "Click-through mode", "mode-click")
         self._btn_click.connect("clicked", lambda *_: self.set_draw_mode(False, emit=True))
-        self._btn_draw.connect("clicked", lambda *_: self.set_draw_mode(True, emit=True))
         root.pack_start(self._btn_click, False, False, 0)
-        root.pack_start(self._btn_draw, False, False, 0)
 
-        self._btn_board = Gtk.Button(label="Board")
-        self._btn_board.get_style_context().add_class("mode-board")
-        self._btn_board.set_tooltip_text(
-            "Toggle board · hover for White / Black"
+        self._btn_board = _icon_button(
+            _ICON_BOARD,
+            "Toggle board · hover for White / Black",
+            "mode-board",
         )
         self._btn_board.connect("clicked", self._on_board_clicked)
         self._btn_board.add_events(
@@ -280,8 +364,8 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(self._sep(), False, False, 0)
 
         # Tools
-        self._btn_pen = Gtk.Button(label="Pen")
-        self._btn_eraser = Gtk.Button(label="Eraser")
+        self._btn_pen = _icon_button(_ICON_PEN, "Pen", "mode-pen")
+        self._btn_eraser = _cairo_icon_button("Eraser", "mode-eraser", _draw_eraser_icon)
         self._btn_pen.connect("clicked", lambda *_: self._select_tool(Tool.PEN))
         self._btn_eraser.connect("clicked", lambda *_: self._select_tool(Tool.ERASER))
         root.pack_start(self._btn_pen, False, False, 0)
@@ -370,14 +454,19 @@ class Toolbar(Gtk.EventBox):
         else:
             ctx.remove_class("active")
 
+    def _sync_mode_buttons(self) -> None:
+        """Ensure exactly one of click/pen/eraser is highlighted."""
+        self._set_active(self._btn_click, not self._draw_mode)
+        self._set_active(self._btn_pen, self._draw_mode and self._tool is Tool.PEN)
+        self._set_active(self._btn_eraser, self._draw_mode and self._tool is Tool.ERASER)
+
     def _ensure_draw_mode(self) -> None:
         if not self._draw_mode:
             self.set_draw_mode(True, emit=True)
 
     def set_draw_mode(self, enabled: bool, *, emit: bool = True) -> None:
         self._draw_mode = enabled
-        self._set_active(self._btn_click, not enabled)
-        self._set_active(self._btn_draw, enabled)
+        self._sync_mode_buttons()
         if emit:
             self._on_mode(enabled)
 
@@ -519,8 +608,7 @@ class Toolbar(Gtk.EventBox):
 
     def _select_tool(self, tool: Tool, *, emit: bool = True) -> None:
         self._tool = tool
-        self._set_active(self._btn_pen, tool is Tool.PEN)
-        self._set_active(self._btn_eraser, tool is Tool.ERASER)
+        self._sync_mode_buttons()
         self._update_size_preview()
         if emit:
             self._on_tool(tool)
@@ -533,8 +621,7 @@ class Toolbar(Gtk.EventBox):
             self._set_active(btn, n == name)
         self._color_name = name
         self._tool = Tool.PEN
-        self._set_active(self._btn_pen, True)
-        self._set_active(self._btn_eraser, False)
+        self._sync_mode_buttons()
         self._update_size_preview()
         if emit:
             self._on_tool(Tool.PEN)
