@@ -8,9 +8,9 @@ from typing import Callable
 import cairo
 
 from glassboard import _gi  # noqa: F401
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, Gtk
 
-from glassboard.board import BOARD_COLOR_DEFAULT
+from glassboard.board import BOARD_COLOR_DEFAULT, BOARD_COLORS
 from glassboard.canvas import (
     COLORS,
     WIDTH_DEFAULT,
@@ -23,8 +23,7 @@ from glassboard.canvas import (
 # Pixels of pointer travel before a grip press counts as a drag (not a click).
 _DRAG_THRESHOLD_PX = 6
 _PREVIEW_SIZE = 36  # Fixed chip; WIDTH_MAX is capped to fit 1:1 inside it.
-_BOARD_MENU_SHOW_MS = 180
-_BOARD_MENU_HIDE_MS = 280
+_BOARD_COLOR_ORDER = ("white", "black")
 
 
 class _SizePreview(Gtk.DrawingArea):
@@ -83,7 +82,6 @@ class _SizePreview(Gtk.DrawingArea):
 
 _BUTTON_ICON_PX = 22
 _ICON_CLICK = "input-mouse-symbolic"
-_ICON_BOARD = "video-display-symbolic"
 _ICON_PEN = "document-edit-symbolic"
 
 
@@ -123,6 +121,35 @@ def _draw_eraser_icon(cr: cairo.Context, size: int) -> None:
     cr.line_to(-length / 2 + split, height / 2)
     cr.stroke()
     cr.restore()
+
+
+def _draw_board_icon(cr: cairo.Context, size: int, color_name: str) -> None:
+    """Filled board plate so the current White/Black choice is obvious."""
+    s = float(size)
+    pad = s * 0.14
+    radius = s * 0.12
+    x, y = pad, pad
+    w = s - 2 * pad
+    h = s - 2 * pad
+    rgba = BOARD_COLORS.get(color_name, BOARD_COLORS[BOARD_COLOR_DEFAULT])
+
+    # Rounded rect fill.
+    cr.new_sub_path()
+    cr.arc(x + w - radius, y + radius, radius, -math.pi / 2, 0)
+    cr.arc(x + w - radius, y + h - radius, radius, 0, math.pi / 2)
+    cr.arc(x + radius, y + h - radius, radius, math.pi / 2, math.pi)
+    cr.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+    cr.set_source_rgba(*rgba)
+    cr.fill_preserve()
+    # Bright outer ring so black (and the plate edge) read on the dark toolbar.
+    cr.set_line_width(max(1.8, s * 0.09))
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
+    cr.stroke_preserve()
+    # Hairline inside the white ring for the white board plate.
+    cr.set_line_width(max(1.0, s * 0.045))
+    cr.set_source_rgba(0.10, 0.10, 0.14, 0.45)
+    cr.stroke()
 
 
 def _theme_icon_image(icon_name: str) -> Gtk.Image:
@@ -175,7 +202,6 @@ class Toolbar(Gtk.EventBox):
         on_clear: Callable[[], None],
         on_quit: Callable[[], None],
         on_board: Callable[[bool, str], None] | None = None,
-        on_board_menu: Callable[[bool], None] | None = None,
         on_moved: Callable[[], None] | None = None,
         on_drag_begin: Callable[[], None] | None = None,
         on_drag_end: Callable[[], None] | None = None,
@@ -190,7 +216,6 @@ class Toolbar(Gtk.EventBox):
         self._on_color = on_color
         self._on_width = on_width
         self._on_board = on_board
-        self._on_board_menu = on_board_menu
         self._on_moved = on_moved
         self._on_drag_begin = on_drag_begin
         self._on_drag_end = on_drag_end
@@ -198,8 +223,6 @@ class Toolbar(Gtk.EventBox):
         self._draw_mode = False
         self._board_open = False
         self._board_color = BOARD_COLOR_DEFAULT
-        self._board_menu_show_id = 0
-        self._board_menu_hide_id = 0
         self._tool = Tool.PEN
         self._width = WIDTH_DEFAULT
         self._color_name = "red"
@@ -245,30 +268,6 @@ class Toolbar(Gtk.EventBox):
             }
             .glassboard-toolbar .mode-board.active {
                 background-color: rgba(240, 240, 235, 0.28);
-            }
-            .glassboard-toolbar .board-menu {
-                background-color: rgba(18, 18, 22, 0.94);
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 0.12);
-                padding: 6px;
-            }
-            .glassboard-toolbar .board-chip {
-                min-width: 72px;
-                min-height: 28px;
-                border-radius: 8px;
-                border: 1px solid rgba(255, 255, 255, 0.18);
-                padding: 4px 10px;
-            }
-            .glassboard-toolbar .board-chip.white {
-                background-color: rgb(245, 245, 240);
-                color: #1a1a1e;
-            }
-            .glassboard-toolbar .board-chip.black {
-                background-color: rgb(20, 20, 24);
-                color: #f2f2f4;
-            }
-            .glassboard-toolbar .board-chip.active {
-                border-color: rgba(70, 140, 255, 0.95);
             }
             .glassboard-toolbar .swatch {
                 min-width: 22px;
@@ -347,19 +346,15 @@ class Toolbar(Gtk.EventBox):
         self._btn_click.connect("clicked", lambda *_: self.set_draw_mode(False, emit=True))
         root.pack_start(self._btn_click, False, False, 0)
 
-        self._btn_board = _icon_button(
-            _ICON_BOARD,
-            "Toggle board · hover for White / Black",
+        self._btn_board = _cairo_icon_button(
+            "Toggle board · right-click cycles White/Black",
             "mode-board",
+            lambda cr, size: _draw_board_icon(cr, size, self._board_color),
         )
         self._btn_board.connect("clicked", self._on_board_clicked)
-        self._btn_board.add_events(
-            Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK
-        )
-        self._btn_board.connect("enter-notify-event", self._on_board_btn_enter)
-        self._btn_board.connect("leave-notify-event", self._on_board_btn_leave)
+        self._btn_board.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self._btn_board.connect("button-press-event", self._on_board_button_press)
         root.pack_start(self._btn_board, False, False, 0)
-        self._build_board_menu()
 
         root.pack_start(self._sep(), False, False, 0)
 
@@ -486,125 +481,47 @@ class Toolbar(Gtk.EventBox):
         color: str | None = None,
         emit: bool = True,
     ) -> None:
-        if color is not None:
+        if color is not None and color in BOARD_COLORS:
             self._board_color = color
         self._board_open = open_
         self._set_active(self._btn_board, open_)
-        self._sync_board_chip_active()
-        self._btn_board.set_tooltip_text(
-            "Hide board · hover for White / Black"
-            if open_
-            else "Toggle board · hover for White / Black"
-        )
+        self._sync_board_icon()
+        self._btn_board.set_tooltip_text(self._board_tooltip())
         if emit and self._on_board is not None:
             self._on_board(open_, self._board_color)
 
+    def _board_tooltip(self) -> str:
+        color = self._board_color.capitalize()
+        if self._board_open:
+            return f"Hide board ({color}) · right-click cycles White/Black"
+        return f"Show board ({color}) · right-click cycles White/Black"
+
+    def _sync_board_icon(self) -> None:
+        self._btn_board.set_image(
+            _cairo_icon_image(
+                lambda cr, size: _draw_board_icon(cr, size, self._board_color)
+            )
+        )
+
     def _on_board_clicked(self, *_args) -> None:
-        # Plain click toggles using the last-used board color.
         self.set_board_open(not self._board_open, emit=True)
 
-    def _build_board_menu(self) -> None:
-        self._board_popover = Gtk.Popover.new(self._btn_board)
-        self._board_popover.set_position(Gtk.PositionType.TOP)
-        self._board_popover.set_modal(False)
-        self._board_popover.get_style_context().add_class("glassboard-toolbar")
-
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.get_style_context().add_class("board-menu")
-        box.set_margin_start(4)
-        box.set_margin_end(4)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
-
-        self._board_chips: dict[str, Gtk.Button] = {}
-        for name, label in (("white", "White"), ("black", "Black")):
-            btn = Gtk.Button(label=label)
-            ctx = btn.get_style_context()
-            ctx.add_class("board-chip")
-            ctx.add_class(name)
-            btn.connect("clicked", lambda _b, n=name: self._pick_board_color(n))
-            self._board_chips[name] = btn
-            box.pack_start(btn, False, False, 0)
-
-        # Keep the popover open while the pointer is over it.
-        event_box = Gtk.EventBox()
-        event_box.add(box)
-        event_box.add_events(
-            Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK
-        )
-        event_box.connect("enter-notify-event", self._on_board_menu_enter)
-        event_box.connect("leave-notify-event", self._on_board_menu_leave)
-
-        self._board_popover.add(event_box)
-        event_box.show_all()
-        self._sync_board_chip_active()
-
-    def _sync_board_chip_active(self) -> None:
-        for name, btn in self._board_chips.items():
-            self._set_active(btn, name == self._board_color)
-
-    def _pick_board_color(self, color: str) -> None:
-        self._cancel_board_menu_timers()
-        self._board_popover.popdown()
-        self._notify_board_menu(False)
-        # Choosing a color always opens (or recolors) the board.
-        self.set_board_open(True, color=color, emit=True)
-
-    def _notify_board_menu(self, open_: bool) -> None:
-        if self._on_board_menu is not None:
-            self._on_board_menu(open_)
-
-    def _cancel_board_menu_timers(self) -> None:
-        if self._board_menu_show_id:
-            GLib.source_remove(self._board_menu_show_id)
-            self._board_menu_show_id = 0
-        if self._board_menu_hide_id:
-            GLib.source_remove(self._board_menu_hide_id)
-            self._board_menu_hide_id = 0
-
-    def _on_board_btn_enter(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
-        if event.detail == Gdk.NotifyType.INFERIOR:
-            return False
-        self._cancel_board_menu_timers()
-
-        def _show() -> bool:
-            self._board_menu_show_id = 0
-            self._notify_board_menu(True)
-            self._sync_board_chip_active()
-            self._board_popover.popup()
-            return False
-
-        self._board_menu_show_id = GLib.timeout_add(_BOARD_MENU_SHOW_MS, _show)
+    def _on_board_button_press(
+        self, _w: Gtk.Widget, event: Gdk.EventButton
+    ) -> bool:
+        if event.button == 3:
+            self.cycle_board_color()
+            return True
         return False
 
-    def _on_board_btn_leave(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
-        if event.detail == Gdk.NotifyType.INFERIOR:
-            return False
-        self._schedule_board_menu_hide()
-        return False
-
-    def _on_board_menu_enter(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
-        if event.detail == Gdk.NotifyType.INFERIOR:
-            return False
-        self._cancel_board_menu_timers()
-        return False
-
-    def _on_board_menu_leave(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
-        if event.detail == Gdk.NotifyType.INFERIOR:
-            return False
-        self._schedule_board_menu_hide()
-        return False
-
-    def _schedule_board_menu_hide(self) -> None:
-        self._cancel_board_menu_timers()
-
-        def _hide() -> bool:
-            self._board_menu_hide_id = 0
-            self._board_popover.popdown()
-            self._notify_board_menu(False)
-            return False
-
-        self._board_menu_hide_id = GLib.timeout_add(_BOARD_MENU_HIDE_MS, _hide)
+    def cycle_board_color(self) -> None:
+        """Flip White ↔ Black without forcing the board open."""
+        try:
+            idx = _BOARD_COLOR_ORDER.index(self._board_color)
+        except ValueError:
+            idx = 0
+        next_color = _BOARD_COLOR_ORDER[(idx + 1) % len(_BOARD_COLOR_ORDER)]
+        self.set_board_open(self._board_open, color=next_color, emit=True)
 
     def _select_tool(self, tool: Tool, *, emit: bool = True) -> None:
         self._tool = tool
@@ -639,6 +556,10 @@ class Toolbar(Gtk.EventBox):
         self._update_size_preview()
         if emit:
             self._on_width(self._width)
+
+    def nudge_width(self, delta: float) -> None:
+        """Adjust stroke size by delta (e.g. mouse wheel in Draw mode)."""
+        self._set_width(self._width + delta, emit=True)
 
     def _on_size_changed(self, scale: Gtk.Scale) -> None:
         self._width = scale.get_value()

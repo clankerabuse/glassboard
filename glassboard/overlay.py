@@ -52,7 +52,6 @@ class OverlayWindow(Gtk.Window):
             on_clear=self._clear,
             on_quit=self.close,
             on_board=self._set_board_open,
-            on_board_menu=self._set_board_menu_open,
             on_moved=self._on_toolbar_moved,
             on_drag_begin=self._on_toolbar_drag_begin,
             on_drag_end=self._on_toolbar_drag_end,
@@ -76,6 +75,8 @@ class OverlayWindow(Gtk.Window):
             | Gdk.EventMask.KEY_PRESS_MASK
             | Gdk.EventMask.ENTER_NOTIFY_MASK
             | Gdk.EventMask.LEAVE_NOTIFY_MASK
+            | Gdk.EventMask.SCROLL_MASK
+            | Gdk.EventMask.SMOOTH_SCROLL_MASK
         )
 
         self.connect("draw", self._on_window_draw)
@@ -86,6 +87,7 @@ class OverlayWindow(Gtk.Window):
         self.connect("enter-notify-event", self._on_enter)
         self.connect("leave-notify-event", self._on_leave)
         self.connect("touch-event", self._on_touch)
+        self.connect("scroll-event", self._on_scroll)
         self.connect("key-press-event", self._on_key_press)
         self.connect("realize", self._on_realize)
         self.connect("map-event", self._on_map)
@@ -139,6 +141,30 @@ class OverlayWindow(Gtk.Window):
     def _set_width(self, width: float) -> None:
         self._ink.set_width(width)
         self.queue_draw()
+
+    def _on_scroll(self, _w: Gtk.Widget, event: Gdk.EventScroll) -> bool:
+        if not self._ink.draw_enabled:
+            return False
+        x, y = self._event_coords(event)
+        if self._event_over_toolbar(x, y):
+            return False
+
+        direction = event.direction
+        if direction == Gdk.ScrollDirection.SMOOTH:
+            dy = float(event.delta_y)
+            if abs(dy) < 0.1:
+                return False
+            # Negative delta_y = wheel up → larger brush.
+            delta = 1.0 if dy < 0 else -1.0
+        elif direction == Gdk.ScrollDirection.UP:
+            delta = 1.0
+        elif direction == Gdk.ScrollDirection.DOWN:
+            delta = -1.0
+        else:
+            return False
+
+        self._toolbar.nudge_width(delta)
+        return True
 
     def _show_eraser_cursor(self) -> bool:
         return (
@@ -224,7 +250,8 @@ class OverlayWindow(Gtk.Window):
 
         if force_default or not self._toolbar_placed:
             x = max(8, (win_w - tw) // 2)
-            y = max(8, win_h - th - 24)
+            # Clear typical bottom panels (~40–54px); overlay is fullscreen.
+            y = max(8, win_h - th - 56)
             self._toolbar.set_pos(x, y)
             self._toolbar_placed = True
         else:
@@ -315,16 +342,6 @@ class OverlayWindow(Gtk.Window):
                 self._toolbar.set_draw_mode(True, emit=True)
         else:
             self._board.hide()
-
-    def _set_board_menu_open(self, open_: bool) -> None:
-        # Popover may sit outside the toolbar hit box; accept full input
-        # while it's up so White/Black remain clickable in Click mode.
-        if open_:
-            reset_input_cache()
-            set_full_input(self)
-        else:
-            reset_input_cache()
-            self._refresh_input_region()
 
     def _refresh_input_region(self) -> None:
         schedule_input_update(
