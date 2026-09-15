@@ -29,8 +29,17 @@ def _apply_region(
     gdk_window.input_shape_combine_region(region, 0, 0)
 
 
+def _cancel_pending() -> None:
+    global _pending_id
+    if _pending_id:
+        GLib.source_remove(_pending_id)
+        _pending_id = 0
+
+
 def set_full_input(window: Gtk.Window) -> None:
-    """Accept pointer events across the entire window (draw mode)."""
+    """Accept pointer events across the entire window (draw mode / drag)."""
+    # A deferred toolbar-only update must not clobber this mid-drag/menu.
+    _cancel_pending()
     width = max(1, window.get_allocated_width())
     height = max(1, window.get_allocated_height())
     _apply_region(window, 0, 0, width, height)
@@ -64,10 +73,7 @@ def apply_input_update(
     draw_mode: bool,
 ) -> None:
     """Apply the input shape immediately (no debounce)."""
-    global _pending_id
-    if _pending_id:
-        GLib.source_remove(_pending_id)
-        _pending_id = 0
+    _cancel_pending()
     if draw_mode:
         set_full_input(window)
     else:
