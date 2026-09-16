@@ -14,6 +14,9 @@ from glassboard.input_region import (
     reset_input_cache,
     schedule_input_update,
     set_full_input,
+    set_passthrough_input,
+    start_input_watchdog,
+    stop_input_watchdog,
 )
 from glassboard.toolbar import Toolbar
 
@@ -89,7 +92,9 @@ class OverlayWindow(Gtk.Window):
         self.connect("touch-event", self._on_touch)
         self.connect("scroll-event", self._on_scroll)
         self.connect("key-press-event", self._on_key_press)
-        self.connect("realize", self._on_realize)
+        # After the default realize handler: GdkWindow must exist, and we need
+        # quark_input_shape_info set before/with GTK's own shape update.
+        self.connect_after("realize", self._on_realize)
         self.connect("map-event", self._on_map)
         self.connect("destroy", self._on_destroy)
 
@@ -97,6 +102,7 @@ class OverlayWindow(Gtk.Window):
         self._set_draw_mode(False)
 
     def _on_destroy(self, *_args) -> None:
+        stop_input_watchdog()
         if self._board.get_realized():
             self._board.destroy()
         Gtk.main_quit()
@@ -211,7 +217,19 @@ class OverlayWindow(Gtk.Window):
         cr.stroke()
 
     def _on_realize(self, *_args) -> None:
-        self._refresh_input_region()
+        # GTK's first buffer commit uses set_input_region(nil) (= full surface)
+        # until a widget-level shape exists. Punch through immediately so we
+        # never sit on a click-sink while the toolbar is still being placed.
+        # Do NOT apply toolbar-only yet — the bar is still at (0,0) until
+        # _ensure_toolbar_placed runs.
+        reset_input_cache()
+        set_passthrough_input(self)
+        start_input_watchdog(
+            self,
+            self._toolbar,
+            is_draw_mode=self._toolbar.is_draw_mode,
+            has_pointer_capture=self._toolbar.has_pointer_capture,
+        )
 
     def _on_map(self, *_args) -> bool:
         GLib.idle_add(self._ensure_toolbar_placed)
@@ -229,6 +247,16 @@ class OverlayWindow(Gtk.Window):
         self._ink.resize(allocation.width, allocation.height)
         if allocation.width > 1 and allocation.height > 1 and self._toolbar_placed:
             self._apply_toolbar_margins(allocation.width, allocation.height)
+            # Re-assert the widget shape after every configure/allocate. GTK
+            # may refresh CSD/input shapes around resize; our Gdk-only path
+            # used to get wiped here and leave a full-screen click sink.
+            if not self._toolbar.has_pointer_capture():
+                apply_input_update(
+                    self,
+                    self._toolbar,
+                    draw_mode=self._toolbar.is_draw_mode(),
+                    force=True,
+                )
 
     def _ensure_toolbar_placed(self) -> bool:
         w = self.get_allocated_width()
@@ -287,7 +315,8 @@ class OverlayWindow(Gtk.Window):
         self._apply_toolbar_margins(win_w, win_h)
 
     def _on_toolbar_drag_begin(self) -> None:
-        # Keep receiving pointer events even if the cursor leaves the toolbar.
+        # Grip press arms fullscreen input so Wayland keeps delivering
+        # motion/release after the cursor leaves the toolbar window.
         reset_input_cache()
         set_full_input(self)
 
@@ -344,6 +373,10 @@ class OverlayWindow(Gtk.Window):
             self._board.hide()
 
     def _refresh_input_region(self) -> None:
+        if not self._toolbar_placed and not self._toolbar.is_draw_mode():
+            # Safer than a wrong (0,0) strip or GTK's default full-surface sink.
+            set_passthrough_input(self)
+            return
         schedule_input_update(
             self,
             self._toolbar,
@@ -403,6 +436,10 @@ class OverlayWindow(Gtk.Window):
         return False
 
     def _on_button_release(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
+        # If the grip armed fullscreen input but Wayland delivered release here
+        # instead of to the grip, clear the click-sink immediately.
+        if event.button == 1 and self._toolbar.has_pointer_capture():
+            self._toolbar.end_pointer_capture()
         x, y = self._event_coords(event)
         old = self._set_cursor_pos(x, y)
         if self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
@@ -469,6 +506,9 @@ class OverlayWindow(Gtk.Window):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
 
         if key == "escape":
+            if self._toolbar.has_pointer_capture():
+                self._toolbar.end_pointer_capture()
+                return True
             if self._toolbar.is_board_open():
                 self._toolbar.set_board_open(False, emit=True)
             elif self._toolbar.is_draw_mode():
