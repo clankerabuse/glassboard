@@ -33,6 +33,7 @@ def main() -> int:
                     region = input_region._last_region
                     print(f"click_region={region}", flush=True)
                     assert region is not None
+                    assert isinstance(region, tuple) and len(region) == 4
                     assert region[0] == win._toolbar.get_pos()[0]
                     assert region[2] >= 100
 
@@ -41,8 +42,7 @@ def main() -> int:
                     def verify_draw() -> bool:
                         try:
                             print(f"draw_region={input_region._last_region}", flush=True)
-                            assert input_region._last_region is not None
-                            assert input_region._last_region[2] >= 1000
+                            assert input_region._last_region == ("full",)
                             assert win._ink.begin_stroke(100, 100)
                             assert win._ink.continue_stroke(180, 140)
                             assert win._ink.end_stroke()

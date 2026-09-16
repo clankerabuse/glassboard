@@ -229,6 +229,8 @@ class Toolbar(Gtk.EventBox):
         self._press_root: tuple[float, float] | None = None
         self._press_pos: tuple[int, int] | None = None
         self._dragging = False
+        # True while button1 is held on the grip (full input may be armed).
+        self._drag_armed = False
         self._pos = (0, 0)
 
         css = Gtk.CssProvider()
@@ -584,32 +586,71 @@ class Toolbar(Gtk.EventBox):
     def set_pos(self, x: int, y: int) -> None:
         self._pos = (x, y)
 
+    def has_pointer_capture(self) -> bool:
+        """True while the grip is holding fullscreen input for a potential drag."""
+        return self._drag_armed
+
+    def end_pointer_capture(self) -> None:
+        """End an armed/active grip drag (safe to call from the overlay window).
+
+        Needed because once fullscreen input is enabled, Wayland may deliver
+        button-release to the overlay instead of the grip — leaving the desktop
+        stuck behind an invisible click sink.
+        """
+        if not self._drag_armed and not self._dragging:
+            return
+        was_dragging = self._dragging
+        self._disarm_grip_pointer(was_dragging=was_dragging)
+
+    def _arm_grip_pointer(self) -> None:
+        if self._drag_armed:
+            return
+        self._drag_armed = True
+        # Keep events on the grip even after the cursor leaves its widget window.
+        Gtk.grab_add(self._grip)
+        # Expand hit-testing immediately so motion outside the toolbar still
+        # reaches us before the drag threshold (otherwise clicks fall through).
+        if self._on_drag_begin:
+            self._on_drag_begin()
+
+    def _disarm_grip_pointer(self, *, was_dragging: bool) -> None:
+        self._press_root = None
+        self._press_pos = None
+        self._dragging = False
+        if self._drag_armed:
+            self._drag_armed = False
+            if Gtk.grab_get_current() is self._grip:
+                Gtk.grab_remove(self._grip)
+        if was_dragging and self._on_moved:
+            self._on_moved()
+        # Always restore the normal input region after arming full capture.
+        if self._on_drag_end:
+            self._on_drag_end()
+
     def _on_grip_press(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
         if event.button != 1:
             return False
         self._press_root = (event.x_root, event.y_root)
         self._press_pos = self._pos
         self._dragging = False
+        self._arm_grip_pointer()
         return True
 
     def _on_grip_release(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
         if event.button != 1:
             return False
+        if not self._drag_armed and not self._dragging:
+            return False
         was_dragging = self._dragging
-        self._press_root = None
-        self._press_pos = None
-        self._dragging = False
-        if was_dragging:
-            if self._on_moved:
-                self._on_moved()
-            if self._on_drag_end:
-                self._on_drag_end()
+        self._disarm_grip_pointer(was_dragging=was_dragging)
         return True
 
     def _on_grip_motion(self, _w: Gtk.Widget, event: Gdk.EventMotion) -> bool:
         if self._press_root is None or self._press_pos is None:
             return False
         if not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+            # Button lost without a release event (common on Wayland overlays).
+            self.end_pointer_capture()
             return False
 
         dx = event.x_root - self._press_root[0]
@@ -618,10 +659,6 @@ class Toolbar(Gtk.EventBox):
             if dx * dx + dy * dy < _DRAG_THRESHOLD_PX * _DRAG_THRESHOLD_PX:
                 return True
             self._dragging = True
-            # Take fullscreen input for the duration of the drag so Wayland
-            # keeps delivering motion once the pointer leaves the old hit box.
-            if self._on_drag_begin:
-                self._on_drag_begin()
 
         self._pos = (int(self._press_pos[0] + dx), int(self._press_pos[1] + dy))
         if self._on_moved:
