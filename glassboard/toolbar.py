@@ -8,17 +8,20 @@ from typing import Callable
 import cairo
 
 from glassboard import _gi  # noqa: F401
-from gi.repository import Gdk, Gtk
+from gi.repository import GLib, Gdk, Gtk
 
 from glassboard.board import BOARD_COLOR_DEFAULT, BOARD_COLORS
 from glassboard.canvas import (
     COLORS,
+    INK_ALPHA,
     WIDTH_DEFAULT,
     WIDTH_MAX,
     WIDTH_MIN,
+    ColorRGBA,
     Tool,
     brush_radius,
 )
+from glassboard.config import load_swatches, save_swatches
 
 # Pixels of pointer travel before a grip press counts as a drag (not a click).
 _DRAG_THRESHOLD_PX = 6
@@ -152,6 +155,91 @@ def _draw_board_icon(cr: cairo.Context, size: int, color_name: str) -> None:
     cr.stroke()
 
 
+def _draw_grip_icon(cr: cairo.Context, width: int, height: int) -> None:
+    """Two tall columns of dots — reads as a vertical drag handle."""
+    cols = 2
+    rows = 3
+    # Slightly larger dots than the old braille glyph.
+    radius = min(width, height) * 0.09
+    gap_x = radius * 2.6
+    gap_y = radius * 2.8
+    total_w = (cols - 1) * gap_x
+    total_h = (rows - 1) * gap_y
+    ox = (width - total_w) / 2.0
+    oy = (height - total_h) / 2.0
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.72)
+    for row in range(rows):
+        for col in range(cols):
+            cr.arc(ox + col * gap_x, oy + row * gap_y, radius, 0, 2 * math.pi)
+            cr.fill()
+
+
+class _GripHandle(Gtk.EventBox):
+    """Drag handle with a tall vertical-dot glyph and grab-hand cursor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_visible_window(True)
+        self.set_above_child(True)
+        self.set_tooltip_text("Drag to move")
+        self.get_style_context().add_class("grip")
+        self.set_size_request(22, 36)
+
+        self._canvas = Gtk.DrawingArea()
+        self._canvas.set_size_request(22, 36)
+        self._canvas.connect("draw", self._on_draw)
+        self.add(self._canvas)
+
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.BUTTON1_MOTION_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.ENTER_NOTIFY_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.connect("realize", self._on_realize)
+        self.connect("enter-notify-event", self._on_enter)
+        self.connect("leave-notify-event", self._on_leave)
+
+        self._cursor_grab: Gdk.Cursor | None = None
+        self._cursor_grabbing: Gdk.Cursor | None = None
+        self._grabbing = False
+
+    def _on_realize(self, *_args) -> None:
+        display = self.get_display()
+        self._cursor_grab = Gdk.Cursor.new_from_name(display, "grab")
+        self._cursor_grabbing = Gdk.Cursor.new_from_name(display, "grabbing")
+        self._apply_cursor()
+
+    def set_grabbing(self, grabbing: bool) -> None:
+        if self._grabbing == grabbing:
+            return
+        self._grabbing = grabbing
+        self._apply_cursor()
+
+    def _apply_cursor(self) -> None:
+        window = self.get_window()
+        if window is None:
+            return
+        cursor = self._cursor_grabbing if self._grabbing else self._cursor_grab
+        if cursor is not None:
+            window.set_cursor(cursor)
+
+    def _on_enter(self, *_args) -> bool:
+        if not self._grabbing:
+            self._apply_cursor()
+        return False
+
+    def _on_leave(self, *_args) -> bool:
+        return False
+
+    def _on_draw(self, _widget: Gtk.Widget, cr: cairo.Context) -> bool:
+        alloc = self._canvas.get_allocation()
+        _draw_grip_icon(cr, alloc.width, alloc.height)
+        return False
+
+
 def _theme_icon_image(icon_name: str) -> Gtk.Image:
     image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
     image.set_pixel_size(_BUTTON_ICON_PX)
@@ -196,7 +284,7 @@ class Toolbar(Gtk.EventBox):
         *,
         on_mode: Callable[[bool], None],
         on_tool: Callable[[Tool], None],
-        on_color: Callable[[str], None],
+        on_color: Callable[[ColorRGBA], None],
         on_width: Callable[[float], None],
         on_undo: Callable[[], None],
         on_clear: Callable[[], None],
@@ -225,12 +313,20 @@ class Toolbar(Gtk.EventBox):
         self._board_color = BOARD_COLOR_DEFAULT
         self._tool = Tool.PEN
         self._width = WIDTH_DEFAULT
-        self._color_name = "red"
+        self._slot_colors: list[ColorRGBA] = load_swatches()
+        self._color_slot = 0
+        self._swatch_providers: list[Gtk.CssProvider] = []
+        self._color_popover: Gtk.Popover | None = None
+        self._color_chooser: Gtk.ColorChooserWidget | None = None
+        self._picker_slot: int | None = None
         self._press_root: tuple[float, float] | None = None
         self._press_pos: tuple[int, int] | None = None
         self._dragging = False
         # True while button1 is held on the grip (full input may be armed).
         self._drag_armed = False
+        # Fail-safe poller that releases a capture whose button-release event
+        # never reached us (would otherwise freeze every button in the app).
+        self._capture_watch_id = 0
         self._pos = (0, 0)
 
         css = Gtk.CssProvider()
@@ -282,12 +378,15 @@ class Toolbar(Gtk.EventBox):
                 border-color: #ffffff;
             }
             .glassboard-toolbar .grip {
-                color: rgba(255, 255, 255, 0.55);
+                min-width: 22px;
+                min-height: 36px;
                 padding: 4px 6px;
-                letter-spacing: 1px;
+                background: transparent;
+                border: none;
+                border-radius: 8px;
             }
             .glassboard-toolbar .grip:hover {
-                color: rgba(255, 255, 255, 0.85);
+                background-color: rgba(255, 255, 255, 0.10);
             }
             .glassboard-toolbar scale {
                 min-width: 110px;
@@ -323,19 +422,8 @@ class Toolbar(Gtk.EventBox):
         root.set_margin_bottom(2)
         self.add(root)
 
-        # Drag handle (⠿): drag to reposition the toolbar.
-        self._grip = Gtk.EventBox()
-        self._grip.set_visible_window(False)
-        self._grip.set_tooltip_text("Drag to move")
-        grip_label = Gtk.Label(label="⠿")
-        grip_label.get_style_context().add_class("grip")
-        self._grip.add(grip_label)
-        self._grip.add_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK
-            | Gdk.EventMask.BUTTON_RELEASE_MASK
-            | Gdk.EventMask.BUTTON1_MOTION_MASK
-            | Gdk.EventMask.POINTER_MOTION_MASK
-        )
+        # Drag handle: tall vertical dots; grab-hand cursor while hovering.
+        self._grip = _GripHandle()
         self._grip.connect("button-press-event", self._on_grip_press)
         self._grip.connect("button-release-event", self._on_grip_release)
         self._grip.connect("motion-notify-event", self._on_grip_motion)
@@ -370,28 +458,28 @@ class Toolbar(Gtk.EventBox):
 
         root.pack_start(self._sep(), False, False, 0)
 
-        # Colors
-        self._swatches: dict[str, Gtk.Button] = {}
-        for name, rgba in COLORS.items():
+        # Colors — left-click selects; right-click opens an RGB picker.
+        self._swatches: list[Gtk.Button] = []
+        for i, rgba in enumerate(self._slot_colors):
             btn = Gtk.Button()
             btn.get_style_context().add_class("swatch")
-            r, g, b, _a = rgba
+            btn.get_style_context().add_class(f"slot-{i}")
             provider = Gtk.CssProvider()
-            provider.load_from_data(
-                f"""
-                button.swatch.{name} {{
-                    background-color: rgb({int(r*255)}, {int(g*255)}, {int(b*255)});
-                    background-image: none;
-                }}
-                """.encode()
-            )
-            btn.get_style_context().add_class(name)
             btn.get_style_context().add_provider(
                 provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
-            btn.set_tooltip_text(name.capitalize())
-            btn.connect("clicked", lambda _b, n=name: self._select_color(n))
-            self._swatches[name] = btn
+            self._swatch_providers.append(provider)
+            self._apply_swatch_style(i, rgba)
+            btn.set_tooltip_text("Left-click: use · Right-click: pick color")
+            btn.connect("clicked", lambda _b, slot=i: self._select_color(slot))
+            btn.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            btn.connect(
+                "button-press-event",
+                lambda _b, event, slot=i: self._on_swatch_button_press(
+                    slot, event
+                ),
+            )
+            self._swatches.append(btn)
             root.pack_start(btn, False, False, 0)
 
         root.pack_start(self._sep(), False, False, 0)
@@ -432,7 +520,9 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(quit_btn, False, False, 0)
 
         self._select_tool(Tool.PEN, emit=False)
-        self._select_color("red", emit=False)
+        self._select_color(0, emit=False)
+        # Apply persisted slot color without forcing Draw mode.
+        self._on_color(self._slot_colors[0])
         self._set_width(WIDTH_DEFAULT, emit=False)
         self.set_draw_mode(False, emit=False)
         self.set_board_open(False, emit=False)
@@ -535,16 +625,107 @@ class Toolbar(Gtk.EventBox):
             if self._on_layout_changed:
                 self._on_layout_changed()
 
-    def _select_color(self, name: str, *, emit: bool = True) -> None:
-        for n, btn in self._swatches.items():
-            self._set_active(btn, n == name)
-        self._color_name = name
+    def _apply_swatch_style(self, slot: int, rgba: ColorRGBA) -> None:
+        r, g, b, _a = rgba
+        self._swatch_providers[slot].load_from_data(
+            f"""
+            button.swatch.slot-{slot} {{
+                background-color: rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)});
+                background-image: none;
+            }}
+            """.encode()
+        )
+
+    def _on_swatch_button_press(self, slot: int, event: Gdk.EventButton) -> bool:
+        if event.button == 3:
+            self._select_color(slot, emit=True)
+            self._open_color_picker(slot)
+            return True
+        return False
+
+    def _open_color_picker(self, slot: int) -> None:
+        self._close_color_picker()
+        self._picker_slot = slot
+
+        popover = Gtk.Popover.new(self._swatches[slot])
+        popover.set_position(Gtk.PositionType.TOP)
+        chooser = Gtk.ColorChooserWidget()
+        chooser.set_use_alpha(False)
+        chooser.set_property("show-editor", False)
+        rgba = Gdk.RGBA()
+        r, g, b, _a = self._slot_colors[slot]
+        rgba.red, rgba.green, rgba.blue, rgba.alpha = r, g, b, 1.0
+        chooser.set_rgba(rgba)
+        chooser.connect("color-activated", self._on_picker_color_activated)
+        chooser.connect("notify::rgba", self._on_picker_rgba_notify)
+        popover.add(chooser)
+        popover.connect("closed", self._on_color_picker_closed)
+        chooser.show_all()
+        self._color_popover = popover
+        self._color_chooser = chooser
+        popover.popup()
+
+    def _close_color_picker(self) -> None:
+        if self._color_popover is not None:
+            self._color_popover.popdown()
+
+    def _on_picker_color_activated(
+        self, chooser: Gtk.ColorChooserWidget, *_args
+    ) -> None:
+        self._commit_picker_color(chooser.get_rgba(), persist=True)
+        self._close_color_picker()
+
+    def _on_picker_rgba_notify(self, chooser: Gtk.ColorChooserWidget, *_args) -> None:
+        # Live-update the swatch while dragging the wheel.
+        if self._picker_slot is None:
+            return
+        self._commit_picker_color(chooser.get_rgba(), persist=False)
+
+    def _on_color_picker_closed(self, popover: Gtk.Popover, *_args) -> None:
+        if self._color_chooser is not None:
+            self._commit_picker_color(self._color_chooser.get_rgba(), persist=True)
+        self._color_popover = None
+        self._color_chooser = None
+        self._picker_slot = None
+        popover.destroy()
+
+    def _commit_picker_color(
+        self, gdk_rgba: Gdk.RGBA, *, persist: bool = True
+    ) -> None:
+        slot = self._picker_slot
+        if slot is None:
+            return
+        color: ColorRGBA = (
+            float(gdk_rgba.red),
+            float(gdk_rgba.green),
+            float(gdk_rgba.blue),
+            INK_ALPHA,
+        )
+        if self._slot_colors[slot] == color and not persist:
+            return
+        self._slot_colors[slot] = color
+        self._apply_swatch_style(slot, color)
+        if slot == self._color_slot:
+            self._update_size_preview()
+            self._on_color(color)
+        if persist:
+            try:
+                save_swatches(self._slot_colors)
+            except OSError:
+                pass
+
+    def _select_color(self, slot: int, *, emit: bool = True) -> None:
+        if not 0 <= slot < len(self._swatches):
+            slot = 0
+        for i, btn in enumerate(self._swatches):
+            self._set_active(btn, i == slot)
+        self._color_slot = slot
         self._tool = Tool.PEN
         self._sync_mode_buttons()
         self._update_size_preview()
         if emit:
             self._on_tool(Tool.PEN)
-            self._on_color(name)
+            self._on_color(self._slot_colors[slot])
             self._ensure_draw_mode()
             if self._on_layout_changed:
                 self._on_layout_changed()
@@ -571,7 +752,7 @@ class Toolbar(Gtk.EventBox):
 
     def _update_size_preview(self) -> None:
         eraser = self._tool is Tool.ERASER
-        color = COLORS.get(self._color_name, COLORS["red"])
+        color = self._slot_colors[self._color_slot]
         self._size_preview.set_preview(self._width, eraser=eraser, color=color)
         self._size_preview.set_tooltip_text(
             "Eraser size" if eraser else "Pen size"
@@ -607,7 +788,12 @@ class Toolbar(Gtk.EventBox):
             return
         self._drag_armed = True
         # Keep events on the grip even after the cursor leaves its widget window.
-        Gtk.grab_add(self._grip)
+        # NOTE: must be the Gtk.Widget method — module-level Gtk.grab_add()
+        # does not exist in PyGObject and raised AttributeError mid-handler,
+        # which left the drag state half-armed (the random "frozen buttons").
+        self._grip.grab_add()
+        self._grip.set_grabbing(True)
+        self._start_capture_watchdog()
         # Expand hit-testing immediately so motion outside the toolbar still
         # reaches us before the drag threshold (otherwise clicks fall through).
         if self._on_drag_begin:
@@ -617,15 +803,60 @@ class Toolbar(Gtk.EventBox):
         self._press_root = None
         self._press_pos = None
         self._dragging = False
+        self._stop_capture_watchdog()
         if self._drag_armed:
             self._drag_armed = False
-            if Gtk.grab_get_current() is self._grip:
-                Gtk.grab_remove(self._grip)
+            # Unconditional: gtk_grab_remove is a safe no-op when not grabbed,
+            # but skipping it when another widget sits on top of the grab
+            # stack would leak our grab and swallow every future click.
+            self._grip.grab_remove()
+            self._grip.set_grabbing(False)
         if was_dragging and self._on_moved:
             self._on_moved()
         # Always restore the normal input region after arming full capture.
         if self._on_drag_end:
             self._on_drag_end()
+
+    def _start_capture_watchdog(self) -> None:
+        """While the grip holds capture, poll the real button state.
+
+        The grip arms fullscreen input + a GTK grab on button press. If the
+        matching release event is lost (Wayland can deliver it to another
+        surface of ours, or not at all after a compositor hiccup), the grab
+        would redirect every click in the app to the grip forever — the
+        classic "all buttons frozen" state. GDK still tracks the device's
+        modifier mask from whatever events it does see, so polling it lets us
+        release the capture even when no event ever reaches the grip.
+        """
+        self._stop_capture_watchdog()
+        self._capture_watch_id = GLib.timeout_add(200, self._capture_tick)
+
+    def _stop_capture_watchdog(self) -> None:
+        if self._capture_watch_id:
+            GLib.source_remove(self._capture_watch_id)
+            self._capture_watch_id = 0
+
+    def _capture_tick(self) -> bool:
+        if not self._drag_armed and not self._dragging:
+            self._capture_watch_id = 0
+            return False
+        if self._grip_button_still_down():
+            return True
+        # Button is up but we never saw the release — free the capture now.
+        self._capture_watch_id = 0
+        self.end_pointer_capture()
+        return False
+
+    def _grip_button_still_down(self) -> bool:
+        window = self.get_window()
+        if window is None:
+            return False
+        seat = self.get_display().get_default_seat()
+        pointer = seat.get_pointer() if seat is not None else None
+        if pointer is None:
+            return False
+        _win, _x, _y, mask = window.get_device_position(pointer)
+        return bool(mask & Gdk.ModifierType.BUTTON1_MASK)
 
     def _on_grip_press(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
         if event.button != 1:
