@@ -12,6 +12,7 @@ from glassboard import _gi  # noqa: F401
 from gi.repository import GLib, Gtk
 
 from glassboard import input_region
+from glassboard.canvas import WIDTH_DEFAULT, width_for_pressure
 from glassboard.overlay import OverlayWindow
 
 
@@ -23,6 +24,7 @@ def main() -> int:
 
     def check() -> bool:
         try:
+
             def verify() -> bool:
                 try:
                     w = win.get_allocated_width()
@@ -46,6 +48,17 @@ def main() -> int:
                             assert win._ink.begin_stroke(100, 100)
                             assert win._ink.continue_stroke(180, 140)
                             assert win._ink.end_stroke()
+
+                            thin = width_for_pressure(WIDTH_DEFAULT, 0.2)
+                            thick = width_for_pressure(WIDTH_DEFAULT, 1.0)
+                            mouse = width_for_pressure(WIDTH_DEFAULT, None)
+                            assert thin < thick
+                            assert abs(thick - WIDTH_DEFAULT) < 0.01
+                            assert abs(mouse - WIDTH_DEFAULT) < 0.01
+                            assert win._ink.begin_stroke(200, 200, 0.25)
+                            assert win._ink.continue_stroke(260, 240, 0.9)
+                            assert win._ink.end_stroke()
+
                             data = win._ink._surface.get_data()
                             stride = win._ink._surface.get_stride()
                             i = 100 * stride + 100 * 4

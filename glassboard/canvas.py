@@ -19,19 +19,47 @@ class Tool(Enum):
     ERASER = auto()
 
 
+INK_ALPHA = 0.95
+
 COLORS: dict[str, tuple[float, float, float, float]] = {
-    "white": (1.0, 1.0, 1.0, 0.95),
-    "black": (0.05, 0.05, 0.05, 0.95),
-    "red": (0.92, 0.22, 0.22, 0.95),
-    "green": (0.18, 0.72, 0.32, 0.95),
-    "blue": (0.22, 0.48, 0.95, 0.95),
-    "yellow": (0.98, 0.82, 0.12, 0.95),
+    "white": (1.0, 1.0, 1.0, INK_ALPHA),
+    "black": (0.05, 0.05, 0.05, INK_ALPHA),
+    "red": (0.92, 0.22, 0.22, INK_ALPHA),
+    "green": (0.18, 0.72, 0.32, INK_ALPHA),
+    "blue": (0.22, 0.48, 0.95, INK_ALPHA),
+    "yellow": (0.98, 0.82, 0.12, INK_ALPHA),
 }
+
+# Four toolbar slots (left → right). Customized colors persist via config.
+DEFAULT_SWATCHES: tuple[tuple[float, float, float, float], ...] = (
+    COLORS["red"],
+    COLORS["blue"],
+    COLORS["green"],
+    COLORS["yellow"],
+)
+
+ColorRGBA = tuple[float, float, float, float]
 
 WIDTH_MIN = 2.0
 # Matches the fixed toolbar preview chip (36px) with a small inset.
 WIDTH_MAX = 32.0
 WIDTH_DEFAULT = 6.0
+
+# Stylus pressure → width. At full pressure the stroke matches the slider;
+# light touch shrinks toward this fraction of the slider width.
+_PRESSURE_MIN_FRAC = 0.18
+
+
+def width_for_pressure(base_width: float, pressure: float | None) -> float:
+    """Map tablet pressure (0..1) onto stroke width. None = mouse / no axis."""
+    base = max(WIDTH_MIN, min(WIDTH_MAX, float(base_width)))
+    if pressure is None:
+        return base
+    p = max(0.0, min(1.0, float(pressure)))
+    # Ease-in so mid-pressure still feels substantial.
+    t = p * p * (3.0 - 2.0 * p)
+    lo = max(WIDTH_MIN, base * _PRESSURE_MIN_FRAC)
+    return lo + (base - lo) * t
 
 # Eraser auto-grow: only while a held stroke stays consistently fast.
 _ERASER_GROW_DELAY_S = 0.40  # must be erasing this long before growth starts
@@ -80,10 +108,15 @@ class InkBoard:
     def set_tool(self, tool: Tool) -> None:
         self.tool = tool
 
-    def set_color(self, name: str) -> None:
-        if name in COLORS:
-            self.color = COLORS[name]
-            self.tool = Tool.PEN
+    def set_color(self, color: ColorRGBA | str) -> None:
+        if isinstance(color, str):
+            if color not in COLORS:
+                return
+            self.color = COLORS[color]
+        else:
+            r, g, b, a = color
+            self.color = (float(r), float(g), float(b), float(a))
+        self.tool = Tool.PEN
 
     def set_width(self, width: float) -> None:
         self.width = max(WIDTH_MIN, min(WIDTH_MAX, float(width)))
@@ -129,10 +162,12 @@ class InkBoard:
         cr.set_source_surface(self._surface, 0, 0)
         cr.paint()
 
-    def begin_stroke(self, x: float, y: float) -> bool:
+    def begin_stroke(
+        self, x: float, y: float, pressure: float | None = None
+    ) -> bool:
         if not self.draw_enabled:
             return False
-        width = self.width
+        width = width_for_pressure(self.width, pressure)
         self._active = Stroke(
             tool=self.tool,
             color=self.color,
@@ -146,16 +181,23 @@ class InkBoard:
         self._stroke_to_surface(self._active)
         return True
 
-    def continue_stroke(self, x: float, y: float) -> bool:
+    def continue_stroke(
+        self, x: float, y: float, pressure: float | None = None
+    ) -> bool:
         if self._active is None:
             return False
         last = self._active.points[-1]
         if (x - last[0]) ** 2 + (y - last[1]) ** 2 < 0.5:
             return True
 
-        width = last[2]
+        width = width_for_pressure(self.width, pressure)
         if self._active.tool is Tool.ERASER:
-            width = self._update_eraser_grow(x, y)
+            # Auto-grow still expands the base; pressure scales the live tip.
+            grown = self._update_eraser_grow(x, y)
+            if pressure is None:
+                width = grown
+            else:
+                width = width_for_pressure(grown, pressure)
 
         self._active.points.append((x, y, width))
         self._active.width = width

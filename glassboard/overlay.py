@@ -53,7 +53,7 @@ class OverlayWindow(Gtk.Window):
             on_width=self._set_width,
             on_undo=self._undo,
             on_clear=self._clear,
-            on_quit=self.close,
+            on_quit=self.quit_app,
             on_board=self._set_board_open,
             on_moved=self._on_toolbar_moved,
             on_drag_begin=self._on_toolbar_drag_begin,
@@ -99,7 +99,38 @@ class OverlayWindow(Gtk.Window):
         self.connect("destroy", self._on_destroy)
 
         self._toolbar_placed = False
+        self._cursor_draw: Gdk.Cursor | None = None
+        self._cursor_blank: Gdk.Cursor | None = None
+        self._tray = None
         self._set_draw_mode(False)
+
+    def set_tray(self, tray) -> None:
+        self._tray = tray
+
+    def quit_app(self) -> None:
+        """Fully exit (toolbar Quit / tray Quit)."""
+        self.close()
+
+    def hide_to_tray(self) -> None:
+        """Dismiss the overlay but keep the process alive for the tray icon."""
+        if self._toolbar.has_pointer_capture():
+            self._toolbar.end_pointer_capture()
+        if self._toolbar.is_board_open():
+            self._toolbar.set_board_open(False, emit=True)
+        if self._toolbar.is_draw_mode():
+            self._toolbar.set_draw_mode(False, emit=True)
+        if self._board.get_visible():
+            self._board.hide()
+        self.hide()
+        if self._tray is not None:
+            self._tray.sync_menu()
+
+    def show_from_tray(self) -> None:
+        """Restore the overlay after hide_to_tray()."""
+        self.show_all()
+        GLib.idle_add(self._ensure_toolbar_placed)
+        if self._tray is not None:
+            self._tray.sync_menu()
 
     def _on_destroy(self, *_args) -> None:
         stop_input_watchdog()
@@ -138,10 +169,12 @@ class OverlayWindow(Gtk.Window):
 
     def _set_tool(self, tool: Tool) -> None:
         self._ink.set_tool(tool)
+        self._refresh_pointer_cursor()
         self.queue_draw()
 
-    def _set_color(self, name: str) -> None:
-        self._ink.set_color(name)
+    def _set_color(self, color: tuple[float, float, float, float]) -> None:
+        self._ink.set_color(color)
+        self._refresh_pointer_cursor()
         self.queue_draw()
 
     def _set_width(self, width: float) -> None:
@@ -222,6 +255,9 @@ class OverlayWindow(Gtk.Window):
         # never sit on a click-sink while the toolbar is still being placed.
         # Do NOT apply toolbar-only yet — the bar is still at (0,0) until
         # _ensure_toolbar_placed runs.
+        display = self.get_display()
+        self._cursor_draw = Gdk.Cursor.new_from_name(display, "crosshair")
+        self._cursor_blank = Gdk.Cursor.new_from_name(display, "none")
         reset_input_cache()
         set_passthrough_input(self)
         start_input_watchdog(
@@ -230,6 +266,25 @@ class OverlayWindow(Gtk.Window):
             is_draw_mode=self._toolbar.is_draw_mode,
             has_pointer_capture=self._toolbar.has_pointer_capture,
         )
+        self._refresh_pointer_cursor()
+
+    def _refresh_pointer_cursor(self) -> None:
+        """Use a drawing crosshair (or blank over the eraser ring), not the arrow."""
+        window = self.get_window()
+        if window is None:
+            return
+        if not self._ink.draw_enabled:
+            window.set_cursor(None)
+            return
+        # Over the toolbar (or left the surface): normal arrow for UI chrome.
+        if self._cursor_pos is None:
+            window.set_cursor(None)
+            return
+        if self._ink.tool is Tool.ERASER:
+            # Painted size ring is the cursor; hide the system pointer.
+            window.set_cursor(self._cursor_blank)
+        else:
+            window.set_cursor(self._cursor_draw)
 
     def _on_map(self, *_args) -> bool:
         GLib.idle_add(self._ensure_toolbar_placed)
@@ -360,6 +415,7 @@ class OverlayWindow(Gtk.Window):
             )
         reset_input_cache()
         self._refresh_input_region()
+        self._refresh_pointer_cursor()
         self.queue_draw()
 
     def _set_board_open(self, open_: bool, color: str) -> None:
@@ -421,7 +477,54 @@ class OverlayWindow(Gtk.Window):
             self._cursor_pos = None
         else:
             self._cursor_pos = (x, y)
+        # Arrow over toolbar chrome; crosshair/blank out on the glass.
+        if (old is None) != (self._cursor_pos is None):
+            self._refresh_pointer_cursor()
         return old
+
+    def _event_pressure(self, event) -> float | None:
+        """Tablet pen pressure in 0..1, or None for mouse / missing axis.
+
+        On Wayland the event's source device is often the master "pointer"
+        (InputSource.MOUSE) even while a Wacom pen is drawing — pressure still
+        arrives on the event via the tablet protocol. Trust the axis / device
+        tool first; only then fall back to device source.
+        """
+        try:
+            ok, value = event.get_axis(Gdk.AxisUse.PRESSURE)
+        except (TypeError, AttributeError):
+            return None
+        if not ok:
+            return None
+        pressure = max(0.0, min(1.0, float(value)))
+
+        tool = event.get_device_tool()
+        if tool is not None:
+            tool_type = tool.get_tool_type()
+            if tool_type in (
+                Gdk.DeviceToolType.PEN,
+                Gdk.DeviceToolType.ERASER,
+                Gdk.DeviceToolType.BRUSH,
+                Gdk.DeviceToolType.PENCIL,
+                Gdk.DeviceToolType.AIRBRUSH,
+            ):
+                return pressure
+            # Explicit mouse/lens tool — ignore any stub pressure axis.
+            return None
+
+        device = event.get_source_device() or event.get_device()
+        if device is not None:
+            source = device.get_source()
+            if source in (Gdk.InputSource.PEN, Gdk.InputSource.ERASER):
+                return pressure
+            axes = device.get_axes()
+            if axes & Gdk.AxisFlags.PRESSURE:
+                return pressure
+            # Master pointer on Wayland: still accept a live pressure reading.
+            if source == Gdk.InputSource.MOUSE and 0.0 < pressure <= 1.0:
+                return pressure
+
+        return None
 
     def _on_button_press(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
         x, y = self._event_coords(event)
@@ -430,7 +533,7 @@ class OverlayWindow(Gtk.Window):
             return False
         if self._event_over_toolbar(x, y):
             return False
-        if self._ink.begin_stroke(x, y):
+        if self._ink.begin_stroke(x, y, self._event_pressure(event)):
             self.queue_draw()
             return True
         return False
@@ -456,7 +559,9 @@ class OverlayWindow(Gtk.Window):
         old = self._set_cursor_pos(x, y)
         handled = False
         if event.state & Gdk.ModifierType.BUTTON1_MASK:
-            if self._cursor_pos is not None and self._ink.continue_stroke(x, y):
+            if self._cursor_pos is not None and self._ink.continue_stroke(
+                x, y, self._event_pressure(event)
+            ):
                 self.queue_draw()
                 handled = True
         elif self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
@@ -474,22 +579,26 @@ class OverlayWindow(Gtk.Window):
         old = self._cursor_pos
         self._cursor_pos = None
         self._invalidate_cursor(old)
+        self._refresh_pointer_cursor()
         return False
 
     def _on_touch(self, _w: Gtk.Widget, event: Gdk.EventTouch) -> bool:
         if not self._ink.draw_enabled:
             return False
         x, y = self._event_coords(event)
+        pressure = self._event_pressure(event)
         if event.type == Gdk.EventType.TOUCH_BEGIN:
             self._set_cursor_pos(x, y)
             if self._event_over_toolbar(x, y):
                 return False
-            if self._ink.begin_stroke(x, y):
+            if self._ink.begin_stroke(x, y, pressure):
                 self.queue_draw()
                 return True
         elif event.type == Gdk.EventType.TOUCH_UPDATE:
             old = self._set_cursor_pos(x, y)
-            if self._cursor_pos is not None and self._ink.continue_stroke(x, y):
+            if self._cursor_pos is not None and self._ink.continue_stroke(
+                x, y, pressure
+            ):
                 self.queue_draw()
                 return True
             if self._ink.tool is Tool.ERASER:
@@ -513,8 +622,10 @@ class OverlayWindow(Gtk.Window):
                 self._toolbar.set_board_open(False, emit=True)
             elif self._toolbar.is_draw_mode():
                 self._toolbar.set_draw_mode(False, emit=True)
+            elif self._tray is not None:
+                self.hide_to_tray()
             else:
-                self.close()
+                self.quit_app()
             return True
         if key == "b" and not ctrl:
             self._toolbar.set_board_open(
@@ -541,7 +652,15 @@ class OverlayWindow(Gtk.Window):
 
 def run() -> None:
     GLib.set_prgname("glassboard")
+    GLib.set_application_name("Glassboard")
     win = OverlayWindow()
+    try:
+        from glassboard.tray import attach_tray
+
+        attach_tray(win)
+    except Exception:
+        # Tray is optional — overlay still runs without it.
+        pass
     win.show_all()
     GLib.idle_add(win._ensure_toolbar_placed)
     Gtk.main()

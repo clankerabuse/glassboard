@@ -30,6 +30,12 @@ def _apply_widget_shape(window: Gtk.Window, region: cairo.Region | None) -> None
     """Set the widget-level input shape so GTK cannot clobber it later."""
     # Gtk.Window is a Gtk.Widget with its own GdkWindow.
     window.input_shape_combine_region(region)
+    # Wayland only honors wl_surface.set_input_region on the NEXT surface
+    # commit, and GDK only commits when a frame is painted. An idle overlay
+    # never paints, so a corrected region could sit client-side forever —
+    # that is exactly the "randomly frozen while doing nothing" state.
+    # Queue a 1px damage so a commit (with the new region) always happens.
+    window.queue_draw_area(0, 0, 1, 1)
 
 
 def _apply_region(
@@ -175,11 +181,12 @@ def start_input_watchdog(
     is_draw_mode,
     has_pointer_capture,
 ) -> None:
-    """Periodically re-assert click-through while idle in Click mode.
+    """Periodically re-assert the input region for the current mode.
 
-    Defends against any future GTK/compositor path that clears the widget
-    shape; without quark_input_shape_info the next paint would restore a
-    full-screen sink.
+    Defends against any GTK/compositor path that clears or desyncs the
+    surface input region (missed commits, surface remaps after hide/show,
+    compositor restarts). Runs in Click AND Draw mode — a Draw-mode desync
+    used to be permanent because nothing ever re-asserted full input.
     """
     global _watchdog_id
     stop_input_watchdog()
@@ -189,12 +196,14 @@ def start_input_watchdog(
             return True
         try:
             if has_pointer_capture():
-                return True
-            if is_draw_mode():
+                # Grip drag owns the region; Toolbar's capture watchdog
+                # guarantees this state cannot persist after button release.
                 return True
             # Force re-apply even if our cache matches — the compositor/GTK
             # side may have diverged.
-            apply_input_update(window, toolbar, draw_mode=False, force=True)
+            apply_input_update(
+                window, toolbar, draw_mode=is_draw_mode(), force=True
+            )
         except Exception:
             pass
         return True
