@@ -5,7 +5,7 @@ from __future__ import annotations
 import cairo
 
 from glassboard import _gi  # noqa: F401
-from gi.repository import Gdk, GLib, Gtk, GtkLayerShell
+from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell
 
 from glassboard.board import SolidBoardWindow
 from glassboard.canvas import InkBoard, Tool, brush_radius
@@ -20,10 +20,16 @@ from glassboard.input_region import (
 )
 from glassboard.toolbar import Toolbar
 
+# Stable D-Bus / GApplication id so a second launch activates the first.
+APPLICATION_ID = "com.glassboard.Glassboard"
+
 
 class OverlayWindow(Gtk.Window):
-    def __init__(self) -> None:
+    def __init__(self, application: Gtk.Application | None = None) -> None:
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self._app = application
+        if application is not None:
+            self.set_application(application)
         self.set_title("Glassboard")
         self.set_decorated(False)
         self.set_app_paintable(True)
@@ -136,7 +142,10 @@ class OverlayWindow(Gtk.Window):
         stop_input_watchdog()
         if self._board.get_realized():
             self._board.destroy()
-        Gtk.main_quit()
+        if self._app is not None:
+            self._app.quit()
+        else:
+            Gtk.main_quit()
 
     def _prepare_transparent_visual(self) -> None:
         screen = self.get_screen()
@@ -650,17 +659,38 @@ class OverlayWindow(Gtk.Window):
         return False
 
 
-def run() -> None:
+def run(argv: list[str] | None = None) -> int:
+    """Run Glassboard as a single-instance Gtk.Application.
+
+    Pinning the .desktop entry and clicking it again activates this process
+    (shows the overlay) instead of spawning another tray icon.
+    """
     GLib.set_prgname("glassboard")
     GLib.set_application_name("Glassboard")
-    win = OverlayWindow()
-    try:
-        from glassboard.tray import attach_tray
 
-        attach_tray(win)
-    except Exception:
-        # Tray is optional — overlay still runs without it.
-        pass
-    win.show_all()
-    GLib.idle_add(win._ensure_toolbar_placed)
-    Gtk.main()
+    app = Gtk.Application(
+        application_id=APPLICATION_ID,
+        flags=Gio.ApplicationFlags.FLAGS_NONE,
+    )
+    state: dict[str, OverlayWindow | None] = {"win": None}
+
+    def on_activate(_application: Gtk.Application) -> None:
+        win = state["win"]
+        if win is None:
+            win = OverlayWindow(application=app)
+            state["win"] = win
+            try:
+                from glassboard.tray import attach_tray
+
+                attach_tray(win)
+            except Exception:
+                # Tray is optional — overlay still runs without it.
+                pass
+            win.show_all()
+            GLib.idle_add(win._ensure_toolbar_placed)
+            return
+        # Taskbar / launcher re-activation: restore if hidden to tray.
+        win.show_from_tray()
+
+    app.connect("activate", on_activate)
+    return int(app.run(argv))
