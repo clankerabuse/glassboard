@@ -1,4 +1,4 @@
-"""Persistent user settings (swatch colors, etc.)."""
+"""Persistent user settings (swatch colors, tool widths, etc.)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,14 @@ import json
 import os
 from pathlib import Path
 
-from glassboard.canvas import DEFAULT_SWATCHES, INK_ALPHA
+from glassboard.canvas import (
+    DEFAULT_SWATCHES,
+    INK_ALPHA,
+    WIDTH_DEFAULT,
+    WIDTH_ERASER_MAX,
+    WIDTH_MIN,
+    WIDTH_PEN_MAX,
+)
 
 _CONFIG_NAME = "settings.json"
 
@@ -19,6 +26,26 @@ def _config_dir() -> Path:
 
 def _config_path() -> Path:
     return _config_dir() / _CONFIG_NAME
+
+
+def _read_settings() -> dict:
+    path = _config_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_settings(updates: dict) -> None:
+    """Merge updates into settings.json (preserves unrelated keys)."""
+    data = _read_settings()
+    data.update(updates)
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _normalize_rgba(
@@ -39,14 +66,7 @@ def _normalize_rgba(
 def load_swatches() -> list[tuple[float, float, float, float]]:
     """Return four RGBA swatches, falling back to defaults on any error."""
     defaults = [tuple(c) for c in DEFAULT_SWATCHES]
-    path = _config_path()
-    if not path.is_file():
-        return defaults
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return defaults
-    raw = data.get("swatches") if isinstance(data, dict) else None
+    raw = _read_settings().get("swatches")
     if not isinstance(raw, list) or len(raw) != 4:
         return defaults
     parsed: list[tuple[float, float, float, float]] = []
@@ -62,9 +82,39 @@ def save_swatches(swatches: list[tuple[float, float, float, float]]) -> None:
     """Persist the four swatch colors."""
     if len(swatches) != 4:
         raise ValueError("expected exactly 4 swatches")
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "swatches": [[round(c, 4) for c in rgba] for rgba in swatches],
-    }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _write_settings(
+        {"swatches": [[round(c, 4) for c in rgba] for rgba in swatches]}
+    )
+
+
+def load_tool_widths() -> dict[str, float]:
+    """Return pen/eraser stroke widths, clamped to each tool's range."""
+    defaults = {"pen": WIDTH_DEFAULT, "eraser": WIDTH_DEFAULT}
+    raw = _read_settings().get("tool_widths")
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    out = dict(defaults)
+    limits = {"pen": WIDTH_PEN_MAX, "eraser": WIDTH_ERASER_MAX}
+    for key, ceiling in limits.items():
+        if key not in raw:
+            continue
+        try:
+            width = float(raw[key])
+        except (TypeError, ValueError):
+            continue
+        out[key] = max(WIDTH_MIN, min(ceiling, width))
+    return out
+
+
+def save_tool_widths(widths: dict[str, float]) -> None:
+    """Persist pen/eraser stroke widths."""
+    pen = max(WIDTH_MIN, min(WIDTH_PEN_MAX, float(widths["pen"])))
+    eraser = max(WIDTH_MIN, min(WIDTH_ERASER_MAX, float(widths["eraser"])))
+    _write_settings(
+        {
+            "tool_widths": {
+                "pen": round(pen, 2),
+                "eraser": round(eraser, 2),
+            }
+        }
+    )

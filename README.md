@@ -45,7 +45,7 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - **Click** — ink stays visible; mouse passes through to apps (toolbar still works)
   - **Draw** — drag to ink on the glass
   - **Board** — pop up a solid board over the desktop (work area only — leaves the taskbar alone); toggle again to retract. Right-click cycles **White** / **Black** (icon updates; does not open the board by itself). Opens into Draw. Shortcut: `B`. Esc retracts the board first.
-  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (each tool remembers its own size; pen max 48px, eraser max 128px); in Draw mode, mouse wheel also changes size for the active tool
+  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (each tool remembers its own size; pen max 24px, eraser max 128px); in Draw mode, mouse wheel also changes size for the active tool
   - Left-click a swatch to draw with it; **right-click** opens an RGB color wheel — custom colors stick on that button across sessions
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Stylus **pressure** scales stroke width (slider = full pressure); mouse always uses the slider width
