@@ -45,14 +45,15 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - **Click** — ink stays visible; mouse passes through to apps (toolbar still works)
   - **Draw** — drag to ink on the glass
   - **Board** — pop up a solid board over the desktop (work area only — leaves the taskbar alone); toggle again to retract. Right-click cycles **White** / **Black** (icon updates; does not open the board by itself). Opens into Draw. Shortcut: `B`. Esc retracts the board first.
-  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (each tool remembers its own size; toolbar shows a live size preview for both); in Draw mode, mouse wheel also changes size for the active tool
+  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (each tool remembers its own size; pen max 48px, eraser max 128px); in Draw mode, mouse wheel also changes size for the active tool
   - Left-click a swatch to draw with it; **right-click** opens an RGB color wheel — custom colors stick on that button across sessions
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Stylus **pressure** scales stroke width (slider = full pressure); mouse always uses the slider width
-  - Stylus **barrel buttons** (Draw mode): button 2 toggles Pen/Eraser; hold button 3 to freeze a size ring at the press point, then drag the tip (marked with a dot) — near the center is fine control (~1–8px), farther out a power curve goes up to 256px. Works for both Pen and Eraser.
+  - Stylus **barrel buttons** (Draw mode): button 2 toggles Pen/Eraser; hold button 3 to freeze a size ring at the press point, then drag the tip (marked with a dot) — near the center is fine control (~1–8px), farther out a power curve up to the active tool’s max. Works for both Pen and Eraser.
   - In Draw mode the pointer becomes a **crosshair** (eraser — and the button-3 size gesture — hide it and show the size ring instead)
   - Eraser also shows a size ring around the cursor while drawing
   - Eraser auto-grows while a stroke is held and moving consistently at a decent speed; pausing or slowing freezes the size (slider base is unchanged)
+  - **Hide / Show** markings (eye icon) — toggles ink visibility without clearing; drawing while hidden reveals them again
   - Undo, Clear, Quit
   - **Drag handle** (vertical dots, grab-hand cursor): drag to reposition the toolbar
 - **System tray** (when AppIndicator is installed): **Show** / **Hide** / **Quit**. Esc in Click mode hides to the tray instead of exiting; tray **Quit** (or toolbar Quit) exits fully.

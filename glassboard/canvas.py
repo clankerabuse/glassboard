@@ -41,9 +41,18 @@ DEFAULT_SWATCHES: tuple[tuple[float, float, float, float], ...] = (
 ColorRGBA = tuple[float, float, float, float]
 
 WIDTH_MIN = 1.0
-# Large enough for broad strokes / tablet size gestures; toolbar chip scales down.
-WIDTH_MAX = 256.0
+# Annotation-friendly pen ceiling; eraser can go wider for quick wipes.
+WIDTH_PEN_MAX = 48.0
+WIDTH_ERASER_MAX = 128.0
+WIDTH_MAX = WIDTH_ERASER_MAX  # absolute ceiling across tools
 WIDTH_DEFAULT = 6.0
+
+
+def max_width_for_tool(tool: Tool) -> float:
+    """Stroke-width upper bound for the active tool."""
+    if tool is Tool.ERASER:
+        return WIDTH_ERASER_MAX
+    return WIDTH_PEN_MAX
 
 # Stylus pressure → width. At full pressure the stroke matches the slider;
 # light touch shrinks toward this fraction of the slider width.

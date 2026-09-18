@@ -12,83 +12,92 @@ from gi.repository import GLib, Gdk, Gtk
 
 from glassboard.board import BOARD_COLOR_DEFAULT, BOARD_COLORS
 from glassboard.canvas import (
-    COLORS,
     INK_ALPHA,
     WIDTH_DEFAULT,
-    WIDTH_MAX,
     WIDTH_MIN,
     ColorRGBA,
     Tool,
-    brush_radius,
+    max_width_for_tool,
 )
 from glassboard.config import load_swatches, save_swatches
 
 # Pixels of pointer travel before a grip press counts as a drag (not a click).
 _DRAG_THRESHOLD_PX = 6
-_PREVIEW_SIZE = 36  # Fixed chip; large brushes are scaled to fit.
 _BOARD_COLOR_ORDER = ("white", "black")
 
 
-class _SizePreview(Gtk.DrawingArea):
-    """Fixed-size chip showing the brush/eraser at true pixel diameter."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.set_size_request(_PREVIEW_SIZE, _PREVIEW_SIZE)
-        self._diameter = WIDTH_DEFAULT
-        self._eraser = False
-        self._color = COLORS["red"]
-        self.connect("draw", self._on_draw)
-
-    def set_preview(
-        self,
-        diameter: float,
-        *,
-        eraser: bool,
-        color: tuple[float, float, float, float] | None = None,
-    ) -> None:
-        self._diameter = max(WIDTH_MIN, min(float(diameter), WIDTH_MAX))
-        self._eraser = eraser
-        if color is not None:
-            self._color = color
-        self.queue_draw()
-
-    def _on_draw(self, _widget: Gtk.Widget, cr: cairo.Context) -> bool:
-        alloc = self.get_allocation()
-        cx = alloc.width / 2.0
-        cy = alloc.height / 2.0
-        plate = min(alloc.width, alloc.height) / 2.0 - 1.0
-        # Scale down when the real brush is larger than the chip.
-        radius = brush_radius(self._diameter)
-        if radius > plate:
-            radius = plate
-
-        # Soft plate behind the preview.
-        cr.set_source_rgba(1, 1, 1, 0.08)
-        cr.arc(cx, cy, plate, 0, 2 * math.pi)
-        cr.fill()
-
-        if self._eraser:
-            cr.set_source_rgba(1, 1, 1, 0.10)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.fill()
-            cr.set_line_width(1.0)
-            cr.set_source_rgba(0.05, 0.05, 0.08, 0.7)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.stroke()
-            cr.set_source_rgba(0.95, 0.95, 0.98, 0.95)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.stroke()
-        else:
-            cr.set_source_rgba(*self._color)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.fill()
-        return False
-
-
 _BUTTON_ICON_PX = 22
-_ICON_CLICK = "input-mouse-symbolic"
-_ICON_PEN = "document-edit-symbolic"
+
+
+def _draw_click_icon(cr: cairo.Context, size: int) -> None:
+    """Mouse / click-through glyph (static pixbuf — not a symbolic theme icon)."""
+    s = float(size)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.set_line_width(max(1.4, s * 0.08))
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.95)
+
+    x, y = s * 0.30, s * 0.12
+    w, h = s * 0.40, s * 0.72
+    r = s * 0.12
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+    cr.stroke()
+    cr.move_to(x + w / 2, y + s * 0.04)
+    cr.line_to(x + w / 2, y + s * 0.28)
+    cr.stroke()
+    cr.arc(x + w / 2, y + s * 0.22, s * 0.045, 0, 2 * math.pi)
+    cr.fill()
+
+
+def _draw_pen_icon(cr: cairo.Context, size: int) -> None:
+    """Pen nib glyph (static pixbuf — not a symbolic theme icon)."""
+    s = float(size)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.set_line_width(max(1.4, s * 0.08))
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.95)
+
+    cr.move_to(s * 0.22, s * 0.72)
+    cr.line_to(s * 0.58, s * 0.20)
+    cr.line_to(s * 0.72, s * 0.34)
+    cr.line_to(s * 0.36, s * 0.86)
+    cr.close_path()
+    cr.stroke()
+    cr.move_to(s * 0.22, s * 0.72)
+    cr.line_to(s * 0.14, s * 0.86)
+    cr.line_to(s * 0.36, s * 0.86)
+    cr.stroke()
+
+
+def _draw_eye_icon(cr: cairo.Context, size: int, *, open_: bool) -> None:
+    """Eye glyph for the ink hide/show toggle (static pixbuf)."""
+    s = float(size)
+    cx, cy = s / 2.0, s / 2.0
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.set_line_width(max(1.4, s * 0.08))
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.95)
+
+    rx, ry = s * 0.38, s * 0.22
+    cr.save()
+    cr.translate(cx, cy)
+    cr.scale(1.0, ry / rx)
+    cr.arc(0.0, 0.0, rx, 0, 2 * math.pi)
+    cr.restore()
+    cr.stroke()
+
+    if open_:
+        cr.arc(cx, cy, s * 0.11, 0, 2 * math.pi)
+        cr.fill()
+    else:
+        cr.move_to(cx - s * 0.28, cy + s * 0.28)
+        cr.line_to(cx + s * 0.28, cy - s * 0.28)
+        cr.stroke()
 
 
 def _draw_eraser_icon(cr: cairo.Context, size: int) -> None:
@@ -243,29 +252,15 @@ class _GripHandle(Gtk.EventBox):
         return False
 
 
-def _theme_icon_image(icon_name: str) -> Gtk.Image:
-    image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
-    image.set_pixel_size(_BUTTON_ICON_PX)
-    return image
-
-
-def _cairo_icon_image(draw_fn) -> Gtk.Image:
+def _cairo_icon_pixbuf(draw_fn) -> Gdk.Pixbuf:
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, _BUTTON_ICON_PX, _BUTTON_ICON_PX)
     cr = cairo.Context(surface)
     draw_fn(cr, _BUTTON_ICON_PX)
-    pixbuf = Gdk.pixbuf_get_from_surface(surface, 0, 0, _BUTTON_ICON_PX, _BUTTON_ICON_PX)
-    return Gtk.Image.new_from_pixbuf(pixbuf)
+    return Gdk.pixbuf_get_from_surface(surface, 0, 0, _BUTTON_ICON_PX, _BUTTON_ICON_PX)
 
 
-def _icon_button(icon_name: str, tooltip: str, css_class: str) -> Gtk.Button:
-    btn = Gtk.Button()
-    btn.set_image(_theme_icon_image(icon_name))
-    btn.set_always_show_image(True)
-    btn.set_relief(Gtk.ReliefStyle.NONE)
-    btn.set_tooltip_text(tooltip)
-    btn.get_style_context().add_class("icon-button")
-    btn.get_style_context().add_class(css_class)
-    return btn
+def _cairo_icon_image(draw_fn) -> Gtk.Image:
+    return Gtk.Image.new_from_pixbuf(_cairo_icon_pixbuf(draw_fn))
 
 
 def _cairo_icon_button(tooltip: str, css_class: str, draw_fn) -> Gtk.Button:
@@ -293,6 +288,7 @@ class Toolbar(Gtk.EventBox):
         on_clear: Callable[[], None],
         on_quit: Callable[[], None],
         on_board: Callable[[bool, str], None] | None = None,
+        on_ink_visible: Callable[[bool], None] | None = None,
         on_moved: Callable[[], None] | None = None,
         on_drag_begin: Callable[[], None] | None = None,
         on_drag_end: Callable[[], None] | None = None,
@@ -300,6 +296,7 @@ class Toolbar(Gtk.EventBox):
     ) -> None:
         super().__init__()
         self.set_visible_window(True)
+        self.set_app_paintable(False)
         self.get_style_context().add_class("glassboard-toolbar")
 
         self._on_mode = on_mode
@@ -307,6 +304,7 @@ class Toolbar(Gtk.EventBox):
         self._on_color = on_color
         self._on_width = on_width
         self._on_board = on_board
+        self._on_ink_visible = on_ink_visible
         self._on_moved = on_moved
         self._on_drag_begin = on_drag_begin
         self._on_drag_end = on_drag_end
@@ -314,6 +312,7 @@ class Toolbar(Gtk.EventBox):
         self._draw_mode = False
         self._board_open = False
         self._board_color = BOARD_COLOR_DEFAULT
+        self._ink_visible = True
         self._tool = Tool.PEN
         self._tool_widths: dict[Tool, float] = {
             Tool.PEN: WIDTH_DEFAULT,
@@ -339,9 +338,11 @@ class Toolbar(Gtk.EventBox):
         css.load_from_data(
             b"""
             .glassboard-toolbar {
-                background-color: rgba(18, 18, 22, 0.88);
+                background-color: rgb(18, 18, 22);
                 border-radius: 14px;
-                border: 1px solid rgba(255, 255, 255, 0.12);
+                /* Opaque border (precomputed 12% white over the bar color) so
+                   ink behind the bar can never blend through the edge. */
+                border: 1px solid rgb(46, 46, 50);
                 padding: 6px;
             }
             .glassboard-toolbar button {
@@ -359,6 +360,11 @@ class Toolbar(Gtk.EventBox):
                 min-height: 36px;
                 padding: 0;
             }
+            .glassboard-toolbar button,
+            .glassboard-toolbar scale {
+                outline-style: none;
+                outline-width: 0;
+            }
             .glassboard-toolbar button:hover {
                 background-color: rgba(255, 255, 255, 0.10);
             }
@@ -372,6 +378,9 @@ class Toolbar(Gtk.EventBox):
             }
             .glassboard-toolbar .mode-board.active {
                 background-color: rgba(240, 240, 235, 0.28);
+            }
+            .glassboard-toolbar .ink-visible.ink-hidden {
+                background-color: rgba(255, 255, 255, 0.18);
             }
             .glassboard-toolbar .swatch {
                 min-width: 22px;
@@ -438,7 +447,9 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(self._sep(), False, False, 0)
 
         # Mode toggle
-        self._btn_click = _icon_button(_ICON_CLICK, "Click-through mode", "mode-click")
+        self._btn_click = _cairo_icon_button(
+            "Click-through mode", "mode-click", _draw_click_icon
+        )
         self._btn_click.connect("clicked", lambda *_: self.set_draw_mode(False, emit=True))
         root.pack_start(self._btn_click, False, False, 0)
 
@@ -455,7 +466,7 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(self._sep(), False, False, 0)
 
         # Tools
-        self._btn_pen = _icon_button(_ICON_PEN, "Pen", "mode-pen")
+        self._btn_pen = _cairo_icon_button("Pen", "mode-pen", _draw_pen_icon)
         self._btn_eraser = _cairo_icon_button("Eraser", "mode-eraser", _draw_eraser_icon)
         self._btn_pen.connect("clicked", lambda *_: self._select_tool(Tool.PEN))
         self._btn_eraser.connect("clicked", lambda *_: self._select_tool(Tool.ERASER))
@@ -490,17 +501,13 @@ class Toolbar(Gtk.EventBox):
 
         root.pack_start(self._sep(), False, False, 0)
 
-        # Size slider + brush/eraser preview
-        self._size_preview = _SizePreview()
-        self._size_preview.set_tooltip_text("Brush size")
-        root.pack_start(self._size_preview, False, False, 0)
-
+        # Size slider (cursor ring / stylus gesture show the true size).
         adjustment = Gtk.Adjustment(
             value=WIDTH_DEFAULT,
             lower=WIDTH_MIN,
-            upper=WIDTH_MAX,
+            upper=max_width_for_tool(Tool.PEN),
             step_increment=1.0,
-            page_increment=16.0,
+            page_increment=8.0,
             page_size=0.0,
         )
         self._size_scale = Gtk.Scale(
@@ -514,6 +521,16 @@ class Toolbar(Gtk.EventBox):
         root.pack_start(self._size_scale, False, False, 0)
 
         root.pack_start(self._sep(), False, False, 0)
+
+        self._btn_ink_visible = _cairo_icon_button(
+            "Hide markings",
+            "ink-visible",
+            lambda cr, size: _draw_eye_icon(cr, size, open_=True),
+        )
+        self._btn_ink_visible.connect(
+            "clicked", lambda *_: self.set_ink_visible(not self._ink_visible)
+        )
+        root.pack_start(self._btn_ink_visible, False, False, 0)
 
         undo_btn = Gtk.Button(label="Undo")
         undo_btn.connect("clicked", lambda *_: on_undo())
@@ -532,9 +549,47 @@ class Toolbar(Gtk.EventBox):
         self._set_width(WIDTH_DEFAULT, emit=False)
         self.set_draw_mode(False, emit=False)
         self.set_board_open(False, emit=False)
+        self.set_ink_visible(True, emit=False)
+
+        # No keyboard navigation in the bar — without this, every click moves
+        # GTK's dotted focus ring between buttons, which reads as "icons
+        # changing" whenever a toggle (e.g. hide/show) is pressed.
+        self._disable_focus_rings()
+
+        # The overlay is a layer-shell surface that rarely holds keyboard
+        # focus, so GTK flips the bar into :backdrop (inactive-window) state
+        # and the theme dims every button/label/swatch. Redraws triggered by
+        # e.g. the hide/show toggle then repaint the bar in that dimmed style.
+        # Strip BACKDROP from the whole subtree so the bar always renders in
+        # its normal style.
+        self._strip_backdrop()
 
         self.show_all()
-        self._update_size_preview()
+
+    def _disable_focus_rings(self) -> None:
+        def walk(widget: Gtk.Widget) -> None:
+            widget.set_can_focus(False)
+            if isinstance(widget, Gtk.Container):
+                for child in widget.get_children():
+                    walk(child)
+
+        walk(self)
+
+    def _strip_backdrop(self) -> None:
+        def on_state_changed(widget: Gtk.Widget, _old: Gtk.StateFlags) -> None:
+            if widget.get_state_flags() & Gtk.StateFlags.BACKDROP:
+                # Re-entrant callback sees no BACKDROP flag, so this cannot loop.
+                widget.unset_state_flags(Gtk.StateFlags.BACKDROP)
+
+        def walk(widget: Gtk.Widget) -> None:
+            widget.connect("state-flags-changed", on_state_changed)
+            if widget.get_state_flags() & Gtk.StateFlags.BACKDROP:
+                widget.unset_state_flags(Gtk.StateFlags.BACKDROP)
+            if isinstance(widget, Gtk.Container):
+                for child in widget.get_children():
+                    walk(child)
+
+        walk(self)
 
     @staticmethod
     def _sep() -> Gtk.Separator:
@@ -623,12 +678,14 @@ class Toolbar(Gtk.EventBox):
 
     def _select_tool(self, tool: Tool, *, emit: bool = True) -> None:
         self._tool = tool
-        self._sync_width_slider(self._tool_widths[tool])
+        self._sync_width_limits()
+        width = min(self._tool_widths[tool], max_width_for_tool(tool))
+        self._tool_widths[tool] = width
+        self._sync_width_slider(width)
         self._sync_mode_buttons()
-        self._update_size_preview()
         if emit:
             self._on_tool(tool)
-            self._on_width(self._tool_widths[tool])
+            self._on_width(width)
             self._ensure_draw_mode()
             if self._on_layout_changed:
                 self._on_layout_changed()
@@ -714,7 +771,6 @@ class Toolbar(Gtk.EventBox):
         self._slot_colors[slot] = color
         self._apply_swatch_style(slot, color)
         if slot == self._color_slot:
-            self._update_size_preview()
             self._on_color(color)
         if persist:
             try:
@@ -729,16 +785,25 @@ class Toolbar(Gtk.EventBox):
             self._set_active(btn, i == slot)
         self._color_slot = slot
         self._tool = Tool.PEN
-        self._sync_width_slider(self._tool_widths[Tool.PEN])
+        self._sync_width_limits()
+        width = min(self._tool_widths[Tool.PEN], max_width_for_tool(Tool.PEN))
+        self._tool_widths[Tool.PEN] = width
+        self._sync_width_slider(width)
         self._sync_mode_buttons()
-        self._update_size_preview()
         if emit:
             self._on_tool(Tool.PEN)
-            self._on_width(self._tool_widths[Tool.PEN])
+            self._on_width(width)
             self._on_color(self._slot_colors[slot])
             self._ensure_draw_mode()
             if self._on_layout_changed:
                 self._on_layout_changed()
+
+    def _sync_width_limits(self) -> None:
+        """Point the size slider at the active tool's max."""
+        upper = max_width_for_tool(self._tool)
+        adj = self._size_scale.get_adjustment()
+        if abs(adj.get_upper() - upper) > 0.01:
+            adj.set_upper(upper)
 
     def _sync_width_slider(self, width: float) -> None:
         if abs(self._size_scale.get_value() - width) > 0.01:
@@ -747,10 +812,9 @@ class Toolbar(Gtk.EventBox):
             self._size_scale.handler_unblock_by_func(self._on_size_changed)
 
     def _set_width(self, width: float, *, emit: bool = True) -> None:
-        width = max(WIDTH_MIN, min(WIDTH_MAX, width))
+        width = max(WIDTH_MIN, min(max_width_for_tool(self._tool), width))
         self._tool_widths[self._tool] = width
         self._sync_width_slider(width)
-        self._update_size_preview()
         if emit:
             self._on_width(width)
 
@@ -759,21 +823,42 @@ class Toolbar(Gtk.EventBox):
         self._set_width(self._tool_widths[self._tool] + delta, emit=True)
 
     def _on_size_changed(self, scale: Gtk.Scale) -> None:
-        width = max(WIDTH_MIN, min(WIDTH_MAX, scale.get_value()))
+        width = max(WIDTH_MIN, min(max_width_for_tool(self._tool), scale.get_value()))
         self._tool_widths[self._tool] = width
-        self._update_size_preview()
         self._on_width(width)
         self._ensure_draw_mode()
 
-    def _update_size_preview(self) -> None:
-        eraser = self._tool is Tool.ERASER
-        color = self._slot_colors[self._color_slot]
-        width = self._tool_widths[self._tool]
-        self._size_preview.set_preview(width, eraser=eraser, color=color)
-        self._size_preview.set_tooltip_text(
-            "Eraser size" if eraser else "Pen size"
+    def is_ink_visible(self) -> bool:
+        return self._ink_visible
+
+    def set_ink_visible(self, visible: bool, *, emit: bool = True) -> None:
+        """Show or hide drawn markings without clearing them."""
+        self._ink_visible = bool(visible)
+        self._sync_ink_visible_button()
+        if emit and self._on_ink_visible is not None:
+            self._on_ink_visible(self._ink_visible)
+
+    def _sync_ink_visible_button(self) -> None:
+        """Swap only the eye pixbuf in place — no widget rebuild, no style churn."""
+        open_ = self._ink_visible
+        pixbuf = _cairo_icon_pixbuf(
+            lambda cr, size: _draw_eye_icon(cr, size, open_=open_)
         )
-        self._size_preview.show()
+        image = self._btn_ink_visible.get_image()
+        if isinstance(image, Gtk.Image):
+            image.set_from_pixbuf(pixbuf)
+        else:
+            self._btn_ink_visible.set_image(Gtk.Image.new_from_pixbuf(pixbuf))
+            self._btn_ink_visible.set_always_show_image(True)
+        self._btn_ink_visible.set_tooltip_text(
+            "Hide markings" if open_ else "Show markings"
+        )
+        # Background hint without touching the shared ".active" mode styles.
+        ctx = self._btn_ink_visible.get_style_context()
+        if open_:
+            ctx.remove_class("ink-hidden")
+        else:
+            ctx.add_class("ink-hidden")
 
     # --- drag handle --------------------------------------------------------
 
