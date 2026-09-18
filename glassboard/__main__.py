@@ -18,7 +18,7 @@ def main() -> None:
 
     from glassboard.overlay import run
 
-    run()
+    sys.exit(run(sys.argv))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,8 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 Then launch **Glassboard** from your app menu / launcher.
 
+Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, so another click restores the overlay (or shows it again if it was hidden to the tray) instead of spawning a second tray icon. The overlay itself is a Wayland layer-shell surface, so it will not look like a normal taskbar window button — the tray icon is the always-visible control while it is running.
+
 ## Usage
 
 - Floating toolbar (bottom center, drag via the **drag handle**):
