@@ -49,7 +49,7 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - Left-click a swatch to draw with it; **right-click** opens an RGB color wheel — custom colors stick on that button across sessions
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Stylus **pressure** scales stroke width (slider = full pressure); mouse always uses the slider width
-  - Stylus **barrel buttons** (Draw mode): button 2 toggles Pen/Eraser; hold button 3 to freeze a size ring at the press point, then drag the tip (marked with a dot) — near the center is fine control (~1–8px), farther out a power curve up to the active tool’s max. Works for both Pen and Eraser.
+  - Stylus **barrel buttons** (Draw mode): button 2 toggles Pen/Eraser; button 3 freezes a size ring at the press point — **click** (no drag) cycles pen sizes through the slider snap dots (1 / 3 / 6; eraser click → maximum); **hold and drag** the tip (marked with a dot) for continuous sizing — near the center is fine control (~1–8px), farther out a power curve up to the active tool’s max.
   - In Draw mode the pointer becomes a **crosshair** (eraser — and the button-3 size gesture — hide it and show the size ring instead)
   - Eraser also shows a size ring around the cursor while drawing
   - Eraser auto-grows while a stroke is held and moving consistently at a decent speed; pausing or slowing freezes the size (slider base is unchanged)
@@ -60,7 +60,7 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
 - Shortcuts (while Draw mode has keyboard focus):
   - `D` toggle Click/Draw
   - `B` toggle solid Board
-  - `P` pen, `E` eraser (stylus button 2 toggles; button 3 press-drag adjusts size)
+  - `P` pen, `E` eraser (stylus button 2 toggles; button 3 click cycles presets / drag adjusts size)
   - Mouse wheel — stroke size up/down
   - `Ctrl+Z` undo, `Ctrl+Backspace` clear
   - `Esc` retract Board, else back to Click, else hide to tray (or quit if no tray)
