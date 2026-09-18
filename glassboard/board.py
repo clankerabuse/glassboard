@@ -11,7 +11,7 @@ BOARD_COLORS: dict[str, tuple[float, float, float, float]] = {
     "white": (0.96, 0.96, 0.94, 0.98),
     "black": (0.08, 0.08, 0.10, 0.98),
 }
-BOARD_COLOR_DEFAULT = "white"
+BOARD_COLOR_DEFAULT = "black"
 
 
 class SolidBoardWindow(Gtk.Window):
