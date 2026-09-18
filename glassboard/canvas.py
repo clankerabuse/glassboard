@@ -40,9 +40,9 @@ DEFAULT_SWATCHES: tuple[tuple[float, float, float, float], ...] = (
 
 ColorRGBA = tuple[float, float, float, float]
 
-WIDTH_MIN = 2.0
-# Matches the fixed toolbar preview chip (36px) with a small inset.
-WIDTH_MAX = 32.0
+WIDTH_MIN = 1.0
+# Large enough for broad strokes / tablet size gestures; toolbar chip scales down.
+WIDTH_MAX = 256.0
 WIDTH_DEFAULT = 6.0
 
 # Stylus pressure → width. At full pressure the stroke matches the slider;
@@ -72,7 +72,7 @@ _ERASER_SPEED_WINDOW_S = 0.14  # recent samples used to estimate speed
 
 def brush_radius(width: float) -> float:
     """Half the painted stroke thickness (matches Cairo line_width / round caps)."""
-    return max(0.5, float(width) / 2.0)
+    return max(WIDTH_MIN / 2.0, float(width) / 2.0)
 
 
 @dataclass
