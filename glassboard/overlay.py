@@ -34,6 +34,9 @@ APPLICATION_ID = "com.glassboard.Glassboard"
 # Stylus button-3 size gesture: frozen ring + tip marker.
 _SIZE_POINTER_DOT_R = 3.0
 _SIZE_POINTER_INVALIDATE_PAD = 8.0
+# Tip travel before a button-3 press counts as a drag (not a preset click).
+# Kept loose so stylus jitter / micro-moves still cycle presets.
+_SIZE_GESTURE_CLICK_PX = 32.0
 # Near-center soft zone: linear WIDTH_MIN..SOFT_MAX over this radius (easy 1px).
 _SIZE_SOFT_ZONE_PX = 12.0
 _SIZE_SOFT_ZONE_MAX = 8.0
@@ -147,6 +150,7 @@ class OverlayWindow(Gtk.Window):
         # Stylus button-3 press-drag size adjust (fixed preview at press point).
         self._size_anchor: tuple[float, float] | None = None
         self._size_pointer: tuple[float, float] | None = None
+        self._size_dragged = False
         self._ink_visible = True
         self._set_draw_mode(False)
 
@@ -653,28 +657,33 @@ class OverlayWindow(Gtk.Window):
         return None
 
     def _begin_size_gesture(self, x: float, y: float) -> None:
-        """Start button-3 size adjust: freeze the preview at the press point."""
+        """Start button-3 size adjust: freeze the preview at the press point.
+
+        Width stays put until the tip moves past the click threshold (drag) or
+        the button is released without dragging (cycle snap-mark presets).
+        """
         self._toolbar._ensure_draw_mode()
         self._size_anchor = (x, y)
         self._size_pointer = (x, y)
+        self._size_dragged = False
         # Keep the logical cursor on the anchor so the ring stays put.
         self._set_cursor_pos(x, y)
-        # Tip is on the center → WIDTH_MIN (easy “tiny” parking spot).
-        width_max = max_width_for_tool(self._ink.tool)
-        self._toolbar._set_width(
-            _width_from_size_gesture_dist(0.0, width_max), emit=True
-        )
         self._refresh_pointer_cursor()
         self._invalidate_cursor(self._size_anchor)
         self._invalidate_size_pointer(self._size_pointer)
 
-    def _end_size_gesture(self) -> None:
+    def _end_size_gesture(self, *, commit: bool = False) -> None:
         if self._size_anchor is None:
             return
         anchor = self._size_anchor
         tip = self._size_pointer
+        was_drag = self._size_dragged
         self._size_anchor = None
         self._size_pointer = None
+        self._size_dragged = False
+        if commit and not was_drag:
+            # Click (no drag): cycle pen snap marks, or jump eraser to max.
+            self._toolbar.cycle_size_preset()
         self._refresh_pointer_cursor()
         self._invalidate_cursor(anchor, self._cursor_pos)
         self._invalidate_size_pointer(tip)
@@ -685,14 +694,22 @@ class OverlayWindow(Gtk.Window):
             return False
         ax, ay = self._size_anchor
         dist = math.hypot(x - ax, y - ay)
+        old_tip = self._size_pointer
+        self._size_pointer = (x, y)
+
+        if not self._size_dragged:
+            if dist < _SIZE_GESTURE_CLICK_PX:
+                # Still a potential click — move the tip marker only.
+                self._invalidate_size_pointer(old_tip, self._size_pointer)
+                return True
+            self._size_dragged = True
+
         width_max = max_width_for_tool(self._ink.tool)
         width = max(
             WIDTH_MIN,
             min(width_max, _width_from_size_gesture_dist(dist, width_max)),
         )
         old_pad = self._cursor_pad()
-        old_tip = self._size_pointer
-        self._size_pointer = (x, y)
         if abs(width - self._ink.width) >= 0.05:
             self._toolbar._set_width(width, emit=True)
         pad = max(old_pad, self._cursor_pad())
@@ -742,7 +759,7 @@ class OverlayWindow(Gtk.Window):
             self._toolbar.end_pointer_capture()
         x, y = self._event_coords(event)
         if event.button == 3 and self._size_anchor is not None:
-            self._end_size_gesture()
+            self._end_size_gesture(commit=True)
             self._set_cursor_pos(x, y)
             return True
         old = self._set_cursor_pos(x, y)

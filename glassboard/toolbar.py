@@ -26,7 +26,19 @@ _DRAG_THRESHOLD_PX = 6
 _BOARD_COLOR_ORDER = ("white", "black")
 
 # Size slider snap marks (dots under the trough) for pen only.
-_SIZE_MARKS_PEN: tuple[float, ...] = (1.0, 3.0, 6.0, 12.0, 18.0, 24.0)
+# Stylus button-3 click (no drag) cycles these same fine-end presets.
+_SIZE_MARKS_PEN: tuple[float, ...] = (1.0, 3.0, 6.0)
+_SIZE_MARK_TOLERANCE = 0.51
+
+
+def _next_size_mark(current: float, marks: tuple[float, ...]) -> float:
+    """Next snap mark after *current*, or the first mark when off the ladder."""
+    if not marks:
+        return WIDTH_MIN
+    for i, mark in enumerate(marks):
+        if abs(current - mark) <= _SIZE_MARK_TOLERANCE:
+            return marks[(i + 1) % len(marks)]
+    return marks[0]
 
 _BUTTON_ICON_PX = 22
 
@@ -875,6 +887,24 @@ class Toolbar(Gtk.EventBox):
         """Adjust the active tool's stroke size by delta (e.g. mouse wheel)."""
         self._set_width(self._tool_widths[self._tool] + delta, emit=True)
 
+    def cycle_size_preset(self) -> None:
+        """Advance to the next snap-mark size (stylus button-3 click, no drag).
+
+        Pen cycles the slider dots (1 / 3 / 6). Eraser has no marks, so a
+        click jumps straight to the tool maximum (quick full wipe).
+        """
+        width = self._tool_widths[self._tool]
+        if self._tool is Tool.PEN:
+            upper = max_width_for_tool(Tool.PEN)
+            marks = tuple(
+                m for m in _SIZE_MARKS_PEN if WIDTH_MIN - 0.01 <= m <= upper + 0.01
+            )
+            nxt = _next_size_mark(width, marks)
+        else:
+            nxt = max_width_for_tool(Tool.ERASER)
+        self._set_width(nxt, emit=True)
+        self._ensure_draw_mode()
+
     def _on_size_changed(self, scale: Gtk.Scale) -> None:
         width = max(WIDTH_MIN, min(max_width_for_tool(self._tool), scale.get_value()))
         self._tool_widths[self._tool] = width
@@ -900,6 +930,7 @@ class Toolbar(Gtk.EventBox):
         except OSError:
             pass
         return False
+
     def is_ink_visible(self) -> bool:
         return self._ink_visible
 
