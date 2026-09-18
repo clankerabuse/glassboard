@@ -11,11 +11,11 @@ from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell
 
 from glassboard.board import SolidBoardWindow
 from glassboard.canvas import (
-    WIDTH_MAX,
     WIDTH_MIN,
     InkBoard,
     Tool,
     brush_radius,
+    max_width_for_tool,
 )
 from glassboard.input_region import (
     apply_input_update,
@@ -37,24 +37,25 @@ _SIZE_POINTER_INVALIDATE_PAD = 8.0
 # Near-center soft zone: linear WIDTH_MIN..SOFT_MAX over this radius (easy 1px).
 _SIZE_SOFT_ZONE_PX = 12.0
 _SIZE_SOFT_ZONE_MAX = 8.0
-# Outside the soft zone: power curve up to WIDTH_MAX by this tip travel.
-_SIZE_GESTURE_D_REF = 140.0
+# Outside the soft zone: power curve up to the active tool's max by this tip travel.
+_SIZE_GESTURE_D_REF = 100.0
 _SIZE_GESTURE_GAMMA = 2.2
 
 
-def _width_from_size_gesture_dist(dist: float) -> float:
+def _width_from_size_gesture_dist(dist: float, width_max: float) -> float:
     """Map tip distance from the press point onto stroke width (soft zone + curve)."""
     dist = max(0.0, float(dist))
+    width_max = max(WIDTH_MIN, float(width_max))
     soft = _SIZE_SOFT_ZONE_PX
-    soft_max = _SIZE_SOFT_ZONE_MAX
+    soft_max = min(_SIZE_SOFT_ZONE_MAX, width_max)
     if dist <= soft:
         # B: 0 → WIDTH_MIN, soft → soft_max (continuous linear).
         t = dist / soft if soft > 0 else 0.0
         return WIDTH_MIN + (soft_max - WIDTH_MIN) * t
-    # A: continue from soft_max → WIDTH_MAX with a power curve.
+    # A: continue from soft_max → width_max with a power curve.
     span = max(1.0, _SIZE_GESTURE_D_REF - soft)
     t = min(1.0, (dist - soft) / span)
-    return soft_max + (WIDTH_MAX - soft_max) * (t ** _SIZE_GESTURE_GAMMA)
+    return soft_max + (width_max - soft_max) * (t ** _SIZE_GESTURE_GAMMA)
 
 
 class OverlayWindow(Gtk.Window):
@@ -94,6 +95,7 @@ class OverlayWindow(Gtk.Window):
             on_clear=self._clear,
             on_quit=self.quit_app,
             on_board=self._set_board_open,
+            on_ink_visible=self._set_ink_visible,
             on_moved=self._on_toolbar_moved,
             on_drag_begin=self._on_toolbar_drag_begin,
             on_drag_end=self._on_toolbar_drag_end,
@@ -144,6 +146,7 @@ class OverlayWindow(Gtk.Window):
         # Stylus button-3 press-drag size adjust (fixed preview at press point).
         self._size_anchor: tuple[float, float] | None = None
         self._size_pointer: tuple[float, float] | None = None
+        self._ink_visible = True
         self._set_draw_mode(False)
 
     def set_tray(self, tray) -> None:
@@ -212,6 +215,15 @@ class OverlayWindow(Gtk.Window):
     def _clear(self) -> None:
         self._ink.clear()
         self.queue_draw()
+
+    def _set_ink_visible(self, visible: bool) -> None:
+        self._ink_visible = bool(visible)
+        self.queue_draw()
+
+    def _ensure_ink_visible(self) -> None:
+        """Reveal markings when the user starts drawing while they are hidden."""
+        if not self._ink_visible:
+            self._toolbar.set_ink_visible(True, emit=True)
 
     def _set_tool(self, tool: Tool) -> None:
         self._ink.set_tool(tool)
@@ -380,7 +392,13 @@ class OverlayWindow(Gtk.Window):
         cr.set_operator(cairo.OPERATOR_SOURCE)
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
-        self._ink.paint(cr)
+        # Restore the default operator before anything else renders. GTK draws
+        # the toolbar with this same context after we return; if it is left on
+        # SOURCE, translucent widget backgrounds replace the surface instead
+        # of blending, and the desktop bleeds through the bar.
+        cr.set_operator(cairo.OPERATOR_OVER)
+        if self._ink_visible:
+            self._ink.paint(cr)
         self._paint_brush_size_cursor(cr)
         return False
 
@@ -630,7 +648,10 @@ class OverlayWindow(Gtk.Window):
         # Keep the logical cursor on the anchor so the ring stays put.
         self._set_cursor_pos(x, y)
         # Tip is on the center → WIDTH_MIN (easy “tiny” parking spot).
-        self._toolbar._set_width(_width_from_size_gesture_dist(0.0), emit=True)
+        width_max = max_width_for_tool(self._ink.tool)
+        self._toolbar._set_width(
+            _width_from_size_gesture_dist(0.0, width_max), emit=True
+        )
         self._refresh_pointer_cursor()
         self._invalidate_cursor(self._size_anchor)
         self._invalidate_size_pointer(self._size_pointer)
@@ -652,7 +673,11 @@ class OverlayWindow(Gtk.Window):
             return False
         ax, ay = self._size_anchor
         dist = math.hypot(x - ax, y - ay)
-        width = max(WIDTH_MIN, min(WIDTH_MAX, _width_from_size_gesture_dist(dist)))
+        width_max = max_width_for_tool(self._ink.tool)
+        width = max(
+            WIDTH_MIN,
+            min(width_max, _width_from_size_gesture_dist(dist, width_max)),
+        )
         old_pad = self._cursor_pad()
         old_tip = self._size_pointer
         self._size_pointer = (x, y)
@@ -692,6 +717,7 @@ class OverlayWindow(Gtk.Window):
             return True
         if self._event_over_toolbar(x, y):
             return False
+        self._ensure_ink_visible()
         if self._ink.begin_stroke(x, y, self._event_pressure(event)):
             self.queue_draw()
             return True
@@ -761,6 +787,7 @@ class OverlayWindow(Gtk.Window):
             self._set_cursor_pos(x, y)
             if self._event_over_toolbar(x, y):
                 return False
+            self._ensure_ink_visible()
             if self._ink.begin_stroke(x, y, pressure):
                 self.queue_draw()
                 return True
