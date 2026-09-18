@@ -25,7 +25,7 @@ from glassboard.config import load_swatches, save_swatches
 
 # Pixels of pointer travel before a grip press counts as a drag (not a click).
 _DRAG_THRESHOLD_PX = 6
-_PREVIEW_SIZE = 36  # Fixed chip; WIDTH_MAX is capped to fit 1:1 inside it.
+_PREVIEW_SIZE = 36  # Fixed chip; large brushes are scaled to fit.
 _BOARD_COLOR_ORDER = ("white", "black")
 
 
@@ -47,7 +47,7 @@ class _SizePreview(Gtk.DrawingArea):
         eraser: bool,
         color: tuple[float, float, float, float] | None = None,
     ) -> None:
-        self._diameter = max(1.0, min(float(diameter), WIDTH_MAX))
+        self._diameter = max(WIDTH_MIN, min(float(diameter), WIDTH_MAX))
         self._eraser = eraser
         if color is not None:
             self._color = color
@@ -57,10 +57,13 @@ class _SizePreview(Gtk.DrawingArea):
         alloc = self.get_allocation()
         cx = alloc.width / 2.0
         cy = alloc.height / 2.0
+        plate = min(alloc.width, alloc.height) / 2.0 - 1.0
+        # Scale down when the real brush is larger than the chip.
         radius = brush_radius(self._diameter)
+        if radius > plate:
+            radius = plate
 
         # Soft plate behind the preview.
-        plate = min(alloc.width, alloc.height) / 2.0 - 1.0
         cr.set_source_rgba(1, 1, 1, 0.08)
         cr.arc(cx, cy, plate, 0, 2 * math.pi)
         cr.fill()
@@ -312,7 +315,10 @@ class Toolbar(Gtk.EventBox):
         self._board_open = False
         self._board_color = BOARD_COLOR_DEFAULT
         self._tool = Tool.PEN
-        self._width = WIDTH_DEFAULT
+        self._tool_widths: dict[Tool, float] = {
+            Tool.PEN: WIDTH_DEFAULT,
+            Tool.ERASER: WIDTH_DEFAULT,
+        }
         self._slot_colors: list[ColorRGBA] = load_swatches()
         self._color_slot = 0
         self._swatch_providers: list[Gtk.CssProvider] = []
@@ -494,7 +500,7 @@ class Toolbar(Gtk.EventBox):
             lower=WIDTH_MIN,
             upper=WIDTH_MAX,
             step_increment=1.0,
-            page_increment=4.0,
+            page_increment=16.0,
             page_size=0.0,
         )
         self._size_scale = Gtk.Scale(
@@ -617,10 +623,12 @@ class Toolbar(Gtk.EventBox):
 
     def _select_tool(self, tool: Tool, *, emit: bool = True) -> None:
         self._tool = tool
+        self._sync_width_slider(self._tool_widths[tool])
         self._sync_mode_buttons()
         self._update_size_preview()
         if emit:
             self._on_tool(tool)
+            self._on_width(self._tool_widths[tool])
             self._ensure_draw_mode()
             if self._on_layout_changed:
                 self._on_layout_changed()
@@ -721,39 +729,47 @@ class Toolbar(Gtk.EventBox):
             self._set_active(btn, i == slot)
         self._color_slot = slot
         self._tool = Tool.PEN
+        self._sync_width_slider(self._tool_widths[Tool.PEN])
         self._sync_mode_buttons()
         self._update_size_preview()
         if emit:
             self._on_tool(Tool.PEN)
+            self._on_width(self._tool_widths[Tool.PEN])
             self._on_color(self._slot_colors[slot])
             self._ensure_draw_mode()
             if self._on_layout_changed:
                 self._on_layout_changed()
 
-    def _set_width(self, width: float, *, emit: bool = True) -> None:
-        self._width = max(WIDTH_MIN, min(WIDTH_MAX, width))
-        if abs(self._size_scale.get_value() - self._width) > 0.01:
+    def _sync_width_slider(self, width: float) -> None:
+        if abs(self._size_scale.get_value() - width) > 0.01:
             self._size_scale.handler_block_by_func(self._on_size_changed)
-            self._size_scale.set_value(self._width)
+            self._size_scale.set_value(width)
             self._size_scale.handler_unblock_by_func(self._on_size_changed)
+
+    def _set_width(self, width: float, *, emit: bool = True) -> None:
+        width = max(WIDTH_MIN, min(WIDTH_MAX, width))
+        self._tool_widths[self._tool] = width
+        self._sync_width_slider(width)
         self._update_size_preview()
         if emit:
-            self._on_width(self._width)
+            self._on_width(width)
 
     def nudge_width(self, delta: float) -> None:
-        """Adjust stroke size by delta (e.g. mouse wheel in Draw mode)."""
-        self._set_width(self._width + delta, emit=True)
+        """Adjust the active tool's stroke size by delta (e.g. mouse wheel)."""
+        self._set_width(self._tool_widths[self._tool] + delta, emit=True)
 
     def _on_size_changed(self, scale: Gtk.Scale) -> None:
-        self._width = scale.get_value()
+        width = max(WIDTH_MIN, min(WIDTH_MAX, scale.get_value()))
+        self._tool_widths[self._tool] = width
         self._update_size_preview()
-        self._on_width(self._width)
+        self._on_width(width)
         self._ensure_draw_mode()
 
     def _update_size_preview(self) -> None:
         eraser = self._tool is Tool.ERASER
         color = self._slot_colors[self._color_slot]
-        self._size_preview.set_preview(self._width, eraser=eraser, color=color)
+        width = self._tool_widths[self._tool]
+        self._size_preview.set_preview(width, eraser=eraser, color=color)
         self._size_preview.set_tooltip_text(
             "Eraser size" if eraser else "Pen size"
         )

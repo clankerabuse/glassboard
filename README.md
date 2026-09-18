@@ -45,11 +45,12 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - **Click** — ink stays visible; mouse passes through to apps (toolbar still works)
   - **Draw** — drag to ink on the glass
   - **Board** — pop up a solid board over the desktop (work area only — leaves the taskbar alone); toggle again to retract. Right-click cycles **White** / **Black** (icon updates; does not open the board by itself). Opens into Draw. Shortcut: `B`. Esc retracts the board first.
-  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (toolbar shows a live size preview for both); in Draw mode, mouse wheel also changes size
+  - Pen / Eraser, **4 color swatches** (defaults: red, blue, green, yellow), stroke **size slider** (each tool remembers its own size; toolbar shows a live size preview for both); in Draw mode, mouse wheel also changes size for the active tool
   - Left-click a swatch to draw with it; **right-click** opens an RGB color wheel — custom colors stick on that button across sessions
   - Choosing Pen, Eraser, a color, or changing size switches to **Draw** if you were in Click
   - Stylus **pressure** scales stroke width (slider = full pressure); mouse always uses the slider width
-  - In Draw mode the pointer becomes a **crosshair** (eraser hides it and shows the size ring instead)
+  - Stylus **barrel buttons** (Draw mode): button 2 toggles Pen/Eraser; hold button 3 to freeze a size ring at the press point, then drag the tip (marked with a dot) — near the center is fine control (~1–8px), farther out a power curve goes up to 256px. Works for both Pen and Eraser.
+  - In Draw mode the pointer becomes a **crosshair** (eraser — and the button-3 size gesture — hide it and show the size ring instead)
   - Eraser also shows a size ring around the cursor while drawing
   - Eraser auto-grows while a stroke is held and moving consistently at a decent speed; pausing or slowing freezes the size (slider base is unchanged)
   - Undo, Clear, Quit
@@ -58,7 +59,7 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
 - Shortcuts (while Draw mode has keyboard focus):
   - `D` toggle Click/Draw
   - `B` toggle solid Board
-  - `P` pen, `E` eraser
+  - `P` pen, `E` eraser (stylus button 2 toggles; button 3 press-drag adjusts size)
   - Mouse wheel — stroke size up/down
   - `Ctrl+Z` undo, `Ctrl+Backspace` clear
   - `Esc` retract Board, else back to Click, else hide to tray (or quit if no tray)

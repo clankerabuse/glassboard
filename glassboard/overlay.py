@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import math
+
 import cairo
 
 from glassboard import _gi  # noqa: F401
 from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell
 
 from glassboard.board import SolidBoardWindow
-from glassboard.canvas import InkBoard, Tool, brush_radius
+from glassboard.canvas import (
+    WIDTH_MAX,
+    WIDTH_MIN,
+    InkBoard,
+    Tool,
+    brush_radius,
+)
 from glassboard.input_region import (
     apply_input_update,
     reset_input_cache,
@@ -22,6 +30,31 @@ from glassboard.toolbar import Toolbar
 
 # Stable D-Bus / GApplication id so a second launch activates the first.
 APPLICATION_ID = "com.glassboard.Glassboard"
+
+# Stylus button-3 size gesture: frozen ring + tip marker.
+_SIZE_POINTER_DOT_R = 3.0
+_SIZE_POINTER_INVALIDATE_PAD = 8.0
+# Near-center soft zone: linear WIDTH_MIN..SOFT_MAX over this radius (easy 1px).
+_SIZE_SOFT_ZONE_PX = 12.0
+_SIZE_SOFT_ZONE_MAX = 8.0
+# Outside the soft zone: power curve up to WIDTH_MAX by this tip travel.
+_SIZE_GESTURE_D_REF = 140.0
+_SIZE_GESTURE_GAMMA = 2.2
+
+
+def _width_from_size_gesture_dist(dist: float) -> float:
+    """Map tip distance from the press point onto stroke width (soft zone + curve)."""
+    dist = max(0.0, float(dist))
+    soft = _SIZE_SOFT_ZONE_PX
+    soft_max = _SIZE_SOFT_ZONE_MAX
+    if dist <= soft:
+        # B: 0 → WIDTH_MIN, soft → soft_max (continuous linear).
+        t = dist / soft if soft > 0 else 0.0
+        return WIDTH_MIN + (soft_max - WIDTH_MIN) * t
+    # A: continue from soft_max → WIDTH_MAX with a power curve.
+    span = max(1.0, _SIZE_GESTURE_D_REF - soft)
+    t = min(1.0, (dist - soft) / span)
+    return soft_max + (WIDTH_MAX - soft_max) * (t ** _SIZE_GESTURE_GAMMA)
 
 
 class OverlayWindow(Gtk.Window):
@@ -108,6 +141,9 @@ class OverlayWindow(Gtk.Window):
         self._cursor_draw: Gdk.Cursor | None = None
         self._cursor_blank: Gdk.Cursor | None = None
         self._tray = None
+        # Stylus button-3 press-drag size adjust (fixed preview at press point).
+        self._size_anchor: tuple[float, float] | None = None
+        self._size_pointer: tuple[float, float] | None = None
         self._set_draw_mode(False)
 
     def set_tray(self, tray) -> None:
@@ -119,6 +155,7 @@ class OverlayWindow(Gtk.Window):
 
     def hide_to_tray(self) -> None:
         """Dismiss the overlay but keep the process alive for the tray icon."""
+        self._end_size_gesture()
         if self._toolbar.has_pointer_capture():
             self._toolbar.end_pointer_capture()
         if self._toolbar.is_board_open():
@@ -214,13 +251,25 @@ class OverlayWindow(Gtk.Window):
         self._toolbar.nudge_width(delta)
         return True
 
-    def _show_eraser_cursor(self) -> bool:
+    def _show_brush_size_cursor(self) -> bool:
+        """Size ring: eraser tool, or while the stylus size gesture is active."""
+        if not self._ink.draw_enabled:
+            return False
+        if self._size_anchor is not None:
+            return True
         return (
-            self._ink.draw_enabled
-            and self._ink.tool is Tool.ERASER
+            self._ink.tool is Tool.ERASER
             and self._cursor_pos is not None
             and not self._event_over_toolbar(*self._cursor_pos)
         )
+
+    def _brush_size_preview_pos(self) -> tuple[float, float] | None:
+        """Where the size ring is drawn — frozen at the press point during resize."""
+        if self._size_anchor is not None:
+            return self._size_anchor
+        if self._show_brush_size_cursor():
+            return self._cursor_pos
+        return None
 
     def _cursor_pad(self) -> float:
         return brush_radius(self._ink.stroke_width()) + 3.0
@@ -238,11 +287,25 @@ class OverlayWindow(Gtk.Window):
                 int(pad * 2) + 2,
             )
 
-    def _paint_eraser_cursor(self, cr: cairo.Context) -> None:
-        if not self._show_eraser_cursor() or self._cursor_pos is None:
+    def _invalidate_size_pointer(self, *positions: tuple[float, float] | None) -> None:
+        pad = _SIZE_POINTER_INVALIDATE_PAD
+        for pos in positions:
+            if pos is None:
+                continue
+            x, y = pos
+            self.queue_draw_area(
+                int(x - pad),
+                int(y - pad),
+                int(pad * 2) + 2,
+                int(pad * 2) + 2,
+            )
+
+    def _paint_brush_size_cursor(self, cr: cairo.Context) -> None:
+        pos = self._brush_size_preview_pos()
+        if pos is None:
             return
-        x, y = self._cursor_pos
-        # Same radius the eraser actually clears (Cairo line_width / 2).
+        x, y = pos
+        # Same radius the brush/eraser actually paints (Cairo line_width / 2).
         radius = brush_radius(self._ink.stroke_width())
         # Exact footprint tint.
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.12)
@@ -257,6 +320,20 @@ class OverlayWindow(Gtk.Window):
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.92)
         cr.arc(x, y, radius, 0, 2 * 3.14159265)
         cr.stroke()
+
+        # Live stylus tip during resize — shows distance from the frozen ring.
+        if self._size_anchor is not None and self._size_pointer is not None:
+            px, py = self._size_pointer
+            cr.set_source_rgba(0.05, 0.05, 0.08, 0.55)
+            cr.arc(px, py, _SIZE_POINTER_DOT_R + 1.0, 0, 2 * 3.14159265)
+            cr.fill()
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
+            cr.arc(px, py, _SIZE_POINTER_DOT_R, 0, 2 * 3.14159265)
+            cr.fill()
+            cr.set_line_width(1.0)
+            cr.set_source_rgba(0.05, 0.05, 0.08, 0.85)
+            cr.arc(px, py, _SIZE_POINTER_DOT_R, 0, 2 * 3.14159265)
+            cr.stroke()
 
     def _on_realize(self, *_args) -> None:
         # GTK's first buffer commit uses set_input_region(nil) (= full surface)
@@ -278,7 +355,7 @@ class OverlayWindow(Gtk.Window):
         self._refresh_pointer_cursor()
 
     def _refresh_pointer_cursor(self) -> None:
-        """Use a drawing crosshair (or blank over the eraser ring), not the arrow."""
+        """Use a drawing crosshair (or blank over the size ring), not the arrow."""
         window = self.get_window()
         if window is None:
             return
@@ -289,7 +366,7 @@ class OverlayWindow(Gtk.Window):
         if self._cursor_pos is None:
             window.set_cursor(None)
             return
-        if self._ink.tool is Tool.ERASER:
+        if self._show_brush_size_cursor():
             # Painted size ring is the cursor; hide the system pointer.
             window.set_cursor(self._cursor_blank)
         else:
@@ -304,7 +381,7 @@ class OverlayWindow(Gtk.Window):
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         self._ink.paint(cr)
-        self._paint_eraser_cursor(cr)
+        self._paint_brush_size_cursor(cr)
         return False
 
     def _on_window_allocate(self, _widget: Gtk.Widget, allocation) -> None:
@@ -491,6 +568,25 @@ class OverlayWindow(Gtk.Window):
             self._refresh_pointer_cursor()
         return old
 
+    def _is_stylus_event(self, event) -> bool:
+        """True for tablet pen / eraser tools (not mouse or touch)."""
+        tool = event.get_device_tool()
+        if tool is not None:
+            return tool.get_tool_type() in (
+                Gdk.DeviceToolType.PEN,
+                Gdk.DeviceToolType.ERASER,
+                Gdk.DeviceToolType.BRUSH,
+                Gdk.DeviceToolType.PENCIL,
+                Gdk.DeviceToolType.AIRBRUSH,
+            )
+        device = event.get_source_device() or event.get_device()
+        if device is not None:
+            return device.get_source() in (
+                Gdk.InputSource.PEN,
+                Gdk.InputSource.ERASER,
+            )
+        return False
+
     def _event_pressure(self, event) -> float | None:
         """Tablet pen pressure in 0..1, or None for mouse / missing axis.
 
@@ -507,39 +603,93 @@ class OverlayWindow(Gtk.Window):
             return None
         pressure = max(0.0, min(1.0, float(value)))
 
+        if self._is_stylus_event(event):
+            return pressure
+
         tool = event.get_device_tool()
         if tool is not None:
-            tool_type = tool.get_tool_type()
-            if tool_type in (
-                Gdk.DeviceToolType.PEN,
-                Gdk.DeviceToolType.ERASER,
-                Gdk.DeviceToolType.BRUSH,
-                Gdk.DeviceToolType.PENCIL,
-                Gdk.DeviceToolType.AIRBRUSH,
-            ):
-                return pressure
             # Explicit mouse/lens tool — ignore any stub pressure axis.
             return None
 
         device = event.get_source_device() or event.get_device()
         if device is not None:
-            source = device.get_source()
-            if source in (Gdk.InputSource.PEN, Gdk.InputSource.ERASER):
-                return pressure
             axes = device.get_axes()
             if axes & Gdk.AxisFlags.PRESSURE:
                 return pressure
             # Master pointer on Wayland: still accept a live pressure reading.
-            if source == Gdk.InputSource.MOUSE and 0.0 < pressure <= 1.0:
+            if device.get_source() == Gdk.InputSource.MOUSE and 0.0 < pressure <= 1.0:
                 return pressure
 
         return None
 
+    def _begin_size_gesture(self, x: float, y: float) -> None:
+        """Start button-3 size adjust: freeze the preview at the press point."""
+        self._toolbar._ensure_draw_mode()
+        self._size_anchor = (x, y)
+        self._size_pointer = (x, y)
+        # Keep the logical cursor on the anchor so the ring stays put.
+        self._set_cursor_pos(x, y)
+        # Tip is on the center → WIDTH_MIN (easy “tiny” parking spot).
+        self._toolbar._set_width(_width_from_size_gesture_dist(0.0), emit=True)
+        self._refresh_pointer_cursor()
+        self._invalidate_cursor(self._size_anchor)
+        self._invalidate_size_pointer(self._size_pointer)
+
+    def _end_size_gesture(self) -> None:
+        if self._size_anchor is None:
+            return
+        anchor = self._size_anchor
+        tip = self._size_pointer
+        self._size_anchor = None
+        self._size_pointer = None
+        self._refresh_pointer_cursor()
+        self._invalidate_cursor(anchor, self._cursor_pos)
+        self._invalidate_size_pointer(tip)
+
+    def _update_size_gesture(self, x: float, y: float) -> bool:
+        """Map tip distance from the frozen press point onto stroke width."""
+        if self._size_anchor is None:
+            return False
+        ax, ay = self._size_anchor
+        dist = math.hypot(x - ax, y - ay)
+        width = max(WIDTH_MIN, min(WIDTH_MAX, _width_from_size_gesture_dist(dist)))
+        old_pad = self._cursor_pad()
+        old_tip = self._size_pointer
+        self._size_pointer = (x, y)
+        if abs(width - self._ink.width) >= 0.05:
+            self._toolbar._set_width(width, emit=True)
+        pad = max(old_pad, self._cursor_pad())
+        self.queue_draw_area(
+            int(ax - pad),
+            int(ay - pad),
+            int(pad * 2) + 2,
+            int(pad * 2) + 2,
+        )
+        self._invalidate_size_pointer(old_tip, self._size_pointer)
+        return True
+
+    def _on_stylus_button_press(self, event: Gdk.EventButton, x: float, y: float) -> bool:
+        """Barrel buttons: 2 toggles pen/eraser; 3 starts size adjust gesture."""
+        if not self._is_stylus_event(event):
+            return False
+        if event.button == 2:
+            nxt = Tool.ERASER if self._ink.tool is Tool.PEN else Tool.PEN
+            self._toolbar._select_tool(nxt)
+            return True
+        if event.button == 3:
+            self._begin_size_gesture(x, y)
+            return True
+        return False
+
     def _on_button_press(self, _w: Gtk.Widget, event: Gdk.EventButton) -> bool:
         x, y = self._event_coords(event)
         self._set_cursor_pos(x, y)
+        if self._on_stylus_button_press(event, x, y):
+            return True
         if event.button != 1 or not self._ink.draw_enabled:
             return False
+        if self._size_anchor is not None:
+            return True
         if self._event_over_toolbar(x, y):
             return False
         if self._ink.begin_stroke(x, y, self._event_pressure(event)):
@@ -553,8 +703,12 @@ class OverlayWindow(Gtk.Window):
         if event.button == 1 and self._toolbar.has_pointer_capture():
             self._toolbar.end_pointer_capture()
         x, y = self._event_coords(event)
+        if event.button == 3 and self._size_anchor is not None:
+            self._end_size_gesture()
+            self._set_cursor_pos(x, y)
+            return True
         old = self._set_cursor_pos(x, y)
-        if self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
+        if self._show_brush_size_cursor() or self._ink.tool is Tool.ERASER:
             self._invalidate_cursor(old, self._cursor_pos)
         if event.button != 1:
             return False
@@ -565,6 +719,10 @@ class OverlayWindow(Gtk.Window):
 
     def _on_motion(self, _w: Gtk.Widget, event: Gdk.EventMotion) -> bool:
         x, y = self._event_coords(event)
+        # During resize the preview stays pinned; only distance from the
+        # press point matters — do not move _cursor_pos with the stylus.
+        if self._size_anchor is not None:
+            return self._update_size_gesture(x, y)
         old = self._set_cursor_pos(x, y)
         handled = False
         if event.state & Gdk.ModifierType.BUTTON1_MASK:
@@ -573,18 +731,21 @@ class OverlayWindow(Gtk.Window):
             ):
                 self.queue_draw()
                 handled = True
-        elif self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
+        elif self._show_brush_size_cursor():
             self._invalidate_cursor(old, self._cursor_pos)
         return handled
 
     def _on_enter(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
         x, y = self._event_coords(event)
+        if self._size_anchor is not None:
+            return self._update_size_gesture(x, y)
         old = self._set_cursor_pos(x, y)
-        if self._ink.draw_enabled and self._ink.tool is Tool.ERASER:
+        if self._show_brush_size_cursor():
             self._invalidate_cursor(old, self._cursor_pos)
         return False
 
     def _on_leave(self, _w: Gtk.Widget, _event: Gdk.EventCrossing) -> bool:
+        self._end_size_gesture()
         old = self._cursor_pos
         self._cursor_pos = None
         self._invalidate_cursor(old)
@@ -610,7 +771,7 @@ class OverlayWindow(Gtk.Window):
             ):
                 self.queue_draw()
                 return True
-            if self._ink.tool is Tool.ERASER:
+            if self._show_brush_size_cursor():
                 self._invalidate_cursor(old, self._cursor_pos)
         elif event.type in (Gdk.EventType.TOUCH_END, Gdk.EventType.TOUCH_CANCEL):
             if self._ink.end_stroke():
