@@ -19,12 +19,14 @@ from glassboard.canvas import (
     Tool,
     max_width_for_tool,
 )
-from glassboard.config import load_swatches, save_swatches
+from glassboard.config import load_swatches, load_tool_widths, save_swatches, save_tool_widths
 
 # Pixels of pointer travel before a grip press counts as a drag (not a click).
 _DRAG_THRESHOLD_PX = 6
 _BOARD_COLOR_ORDER = ("white", "black")
 
+# Size slider snap marks (dots under the trough) for pen only.
+_SIZE_MARKS_PEN: tuple[float, ...] = (1.0, 3.0, 6.0, 12.0, 18.0, 24.0)
 
 _BUTTON_ICON_PX = 22
 
@@ -316,10 +318,12 @@ class Toolbar(Gtk.EventBox):
         self._board_color = BOARD_COLOR_DEFAULT
         self._ink_visible = True
         self._tool = Tool.PEN
+        saved_widths = load_tool_widths()
         self._tool_widths: dict[Tool, float] = {
-            Tool.PEN: WIDTH_DEFAULT,
-            Tool.ERASER: WIDTH_DEFAULT,
+            Tool.PEN: saved_widths["pen"],
+            Tool.ERASER: saved_widths["eraser"],
         }
+        self._widths_save_id = 0
         self._slot_colors: list[ColorRGBA] = load_swatches()
         self._color_slot = 0
         self._swatch_providers: list[Gtk.CssProvider] = []
@@ -407,7 +411,7 @@ class Toolbar(Gtk.EventBox):
             }
             .glassboard-toolbar scale {
                 min-width: 110px;
-                padding: 0 4px;
+                padding: 0 4px 2px 4px;
             }
             .glassboard-toolbar scale trough {
                 background-color: rgba(255, 255, 255, 0.15);
@@ -423,6 +427,17 @@ class Toolbar(Gtk.EventBox):
                 border-radius: 8px;
                 min-width: 14px;
                 min-height: 14px;
+            }
+            .glassboard-toolbar scale marks.bottom {
+                min-height: 7px;
+            }
+            .glassboard-toolbar scale mark indicator {
+                background-color: rgba(255, 255, 255, 0.42);
+                border: none;
+                border-radius: 50%;
+                min-width: 3px;
+                min-height: 3px;
+                margin-top: 2px;
             }
             """
         )
@@ -519,6 +534,7 @@ class Toolbar(Gtk.EventBox):
         self._size_scale.set_draw_value(False)
         self._size_scale.set_size_request(110, -1)
         self._size_scale.set_tooltip_text("Stroke size")
+        self._size_scale.set_has_origin(True)
         self._size_scale.connect("value-changed", self._on_size_changed)
         root.pack_start(self._size_scale, False, False, 0)
 
@@ -548,7 +564,7 @@ class Toolbar(Gtk.EventBox):
         self._select_color(0, emit=False)
         # Apply persisted slot color without forcing Draw mode.
         self._on_color(self._slot_colors[0])
-        self._set_width(WIDTH_DEFAULT, emit=False)
+        self._set_width(self._tool_widths[Tool.PEN], emit=False)
         self.set_draw_mode(False, emit=False)
         self.set_board_open(False, emit=False)
         self.set_ink_visible(True, emit=False)
@@ -824,11 +840,22 @@ class Toolbar(Gtk.EventBox):
                 self._on_layout_changed()
 
     def _sync_width_limits(self) -> None:
-        """Point the size slider at the active tool's max."""
+        """Point the size slider at the active tool's max and snap marks."""
         upper = max_width_for_tool(self._tool)
         adj = self._size_scale.get_adjustment()
         if abs(adj.get_upper() - upper) > 0.01:
             adj.set_upper(upper)
+        self._sync_size_marks()
+
+    def _sync_size_marks(self) -> None:
+        """Tick dots under the trough for pen; GTK also snaps the slider near them."""
+        self._size_scale.clear_marks()
+        if self._tool is not Tool.PEN:
+            return
+        upper = max_width_for_tool(self._tool)
+        for value in _SIZE_MARKS_PEN:
+            if WIDTH_MIN - 0.01 <= value <= upper + 0.01:
+                self._size_scale.add_mark(value, Gtk.PositionType.BOTTOM, None)
 
     def _sync_width_slider(self, width: float) -> None:
         if abs(self._size_scale.get_value() - width) > 0.01:
@@ -842,6 +869,7 @@ class Toolbar(Gtk.EventBox):
         self._sync_width_slider(width)
         if emit:
             self._on_width(width)
+            self._schedule_save_widths()
 
     def nudge_width(self, delta: float) -> None:
         """Adjust the active tool's stroke size by delta (e.g. mouse wheel)."""
@@ -852,7 +880,26 @@ class Toolbar(Gtk.EventBox):
         self._tool_widths[self._tool] = width
         self._on_width(width)
         self._ensure_draw_mode()
+        self._schedule_save_widths()
 
+    def _schedule_save_widths(self) -> None:
+        """Debounce disk writes while the slider / size gesture is moving."""
+        if self._widths_save_id:
+            GLib.source_remove(self._widths_save_id)
+        self._widths_save_id = GLib.timeout_add(300, self._persist_tool_widths)
+
+    def _persist_tool_widths(self) -> bool:
+        self._widths_save_id = 0
+        try:
+            save_tool_widths(
+                {
+                    "pen": self._tool_widths[Tool.PEN],
+                    "eraser": self._tool_widths[Tool.ERASER],
+                }
+            )
+        except OSError:
+            pass
+        return False
     def is_ink_visible(self) -> bool:
         return self._ink_visible
 

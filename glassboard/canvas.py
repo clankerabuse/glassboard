@@ -42,7 +42,7 @@ ColorRGBA = tuple[float, float, float, float]
 
 WIDTH_MIN = 1.0
 # Annotation-friendly pen ceiling; eraser can go wider for quick wipes.
-WIDTH_PEN_MAX = 48.0
+WIDTH_PEN_MAX = 24.0
 WIDTH_ERASER_MAX = 128.0
 WIDTH_MAX = WIDTH_ERASER_MAX  # absolute ceiling across tools
 WIDTH_DEFAULT = 6.0
