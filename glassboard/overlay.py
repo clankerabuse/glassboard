@@ -100,6 +100,7 @@ class OverlayWindow(Gtk.Window):
             on_drag_begin=self._on_toolbar_drag_begin,
             on_drag_end=self._on_toolbar_drag_end,
             on_layout_changed=self._on_toolbar_layout_changed,
+            on_pointer_chrome=self._on_pointer_chrome,
         )
         self._toolbar.set_halign(Gtk.Align.START)
         self._toolbar.set_valign(Gtk.Align.START)
@@ -503,6 +504,17 @@ class OverlayWindow(Gtk.Window):
 
         GLib.idle_add(_after_resize)
 
+    def _on_pointer_chrome(self, over: bool) -> None:
+        """Hide eraser size preview while the pointer is on the toolbar."""
+        if over:
+            old = self._cursor_pos
+            if old is None:
+                return
+            self._cursor_pos = None
+            self._invalidate_cursor(old)
+            self._refresh_pointer_cursor()
+        # Leaving chrome: next motion/enter on the glass restores the preview.
+
     def _set_draw_mode(self, enabled: bool) -> None:
         self._ink.set_draw_enabled(enabled)
         if not enabled:
@@ -757,7 +769,11 @@ class OverlayWindow(Gtk.Window):
             ):
                 self.queue_draw()
                 handled = True
-        elif self._show_brush_size_cursor():
+        elif old != self._cursor_pos and (
+            self._ink.tool is Tool.ERASER or self._show_brush_size_cursor()
+        ):
+            # Must invalidate when the ring disappears (e.g. over the toolbar),
+            # not only while it is still shown — otherwise a ghost sticks.
             self._invalidate_cursor(old, self._cursor_pos)
         return handled
 
@@ -766,7 +782,9 @@ class OverlayWindow(Gtk.Window):
         if self._size_anchor is not None:
             return self._update_size_gesture(x, y)
         old = self._set_cursor_pos(x, y)
-        if self._show_brush_size_cursor():
+        if old != self._cursor_pos and (
+            self._ink.tool is Tool.ERASER or self._show_brush_size_cursor()
+        ):
             self._invalidate_cursor(old, self._cursor_pos)
         return False
 
@@ -798,7 +816,9 @@ class OverlayWindow(Gtk.Window):
             ):
                 self.queue_draw()
                 return True
-            if self._show_brush_size_cursor():
+            if old != self._cursor_pos and (
+                self._ink.tool is Tool.ERASER or self._show_brush_size_cursor()
+            ):
                 self._invalidate_cursor(old, self._cursor_pos)
         elif event.type in (Gdk.EventType.TOUCH_END, Gdk.EventType.TOUCH_CANCEL):
             if self._ink.end_stroke():

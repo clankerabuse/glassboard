@@ -70,6 +70,13 @@ def width_for_pressure(base_width: float, pressure: float | None) -> float:
     lo = max(WIDTH_MIN, base * _PRESSURE_MIN_FRAC)
     return lo + (base - lo) * t
 
+# Stroke feel: light EMA on input + midpoint quadratic curves when painting.
+# Tuned for full-screen overlays — smooth without feeling laggy.
+_SMOOTH_ALPHA = 0.55  # blend toward raw sample (higher = snappier)
+_MIN_POINT_DIST2 = 1.5 ** 2  # skip micro-jitter after smoothing (px²)
+# 1.0 = full midpoint curve (rounder); 0.0 = straight segments.
+_CURVE_TENSION = 0.72
+
 # Eraser auto-grow: only while a held stroke stays consistently fast.
 _ERASER_GROW_DELAY_S = 0.40  # must be erasing this long before growth starts
 _ERASER_GROW_MIN_SPEED = 320.0  # px/s — "reasonably fast"
@@ -196,7 +203,11 @@ class InkBoard:
         if self._active is None:
             return False
         last = self._active.points[-1]
-        if (x - last[0]) ** 2 + (y - last[1]) ** 2 < 0.5:
+        # EMA toward the raw sample — damps hand/stylus jitter without a long lag.
+        a = _SMOOTH_ALPHA
+        x = last[0] + a * (x - last[0])
+        y = last[1] + a * (y - last[1])
+        if (x - last[0]) ** 2 + (y - last[1]) ** 2 < _MIN_POINT_DIST2:
             return True
 
         width = width_for_pressure(self.width, pressure)
@@ -216,6 +227,8 @@ class InkBoard:
     def end_stroke(self) -> bool:
         if self._active is None:
             return False
+        # Curves stop at midpoints while drawing; close out to the real tip.
+        self._stroke_to_surface(self._active, from_index=-1)
         self._strokes.append(self._active)
         self._active = None
         self._reset_eraser_grow()
@@ -319,38 +332,60 @@ class InkBoard:
     def _paint_stroke(self, ctx: cairo.Context, stroke: Stroke) -> None:
         if len(stroke.points) < 1:
             return
-        if stroke.tool is Tool.ERASER:
-            ctx.set_operator(cairo.OPERATOR_CLEAR)
-        else:
-            ctx.set_operator(cairo.OPERATOR_OVER)
-            ctx.set_source_rgba(*stroke.color)
+        self._configure_stroke_ctx(ctx, stroke)
 
-        ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-        ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-
-        x0, y0, w0 = stroke.points[0]
-        if len(stroke.points) == 1:
+        pts = stroke.points
+        x0, y0, w0 = pts[0]
+        if len(pts) == 1:
             ctx.arc(x0, y0, brush_radius(w0), 0, 2 * math.pi)
             ctx.fill()
             return
 
-        # Segment-by-segment so eraser auto-grow keeps earlier thin parts thin.
-        for i in range(1, len(stroke.points)):
-            x0, y0, _w0 = stroke.points[i - 1]
-            x1, y1, w1 = stroke.points[i]
-            ctx.set_line_width(w1)
-            ctx.move_to(x0, y0)
-            ctx.line_to(x1, y1)
-            ctx.stroke()
+        if len(pts) == 2:
+            _stroke_line(ctx, pts[0], pts[1])
+            return
+
+        # Midpoint quadratic path: sharp corners at samples become soft curves.
+        mid0 = _midpoint(pts[0], pts[1])
+        _stroke_line(ctx, pts[0], (*mid0, pts[1][2]))
+        for i in range(1, len(pts) - 1):
+            mid_a = _midpoint(pts[i - 1], pts[i])
+            mid_b = _midpoint(pts[i], pts[i + 1])
+            _stroke_quad(ctx, mid_a, pts[i], mid_b, pts[i][2])
+        mid_last = _midpoint(pts[-2], pts[-1])
+        _stroke_line(ctx, (*mid_last, pts[-1][2]), pts[-1])
 
     def _stroke_to_surface(self, stroke: Stroke, from_index: int = 0) -> None:
         if self._surface is None or len(stroke.points) < 1:
             return
         ctx = cairo.Context(self._surface)
-        if from_index <= 0 or len(stroke.points) < 2:
+        if from_index == 0:
             self._paint_stroke(ctx, stroke)
             return
 
+        self._configure_stroke_ctx(ctx, stroke)
+        pts = stroke.points
+
+        # Finish: last midpoint → tip (live ink only advances through midpoints).
+        if from_index == -1:
+            if len(pts) < 2:
+                return
+            mid = _midpoint(pts[-2], pts[-1])
+            _stroke_line(ctx, (*mid, pts[-1][2]), pts[-1])
+            return
+
+        if from_index == 1 and len(pts) >= 2:
+            mid = _midpoint(pts[0], pts[1])
+            _stroke_line(ctx, pts[0], (*mid, pts[1][2]))
+            return
+
+        if from_index >= 2 and len(pts) >= from_index + 1:
+            i = from_index - 1
+            mid_a = _midpoint(pts[i - 1], pts[i])
+            mid_b = _midpoint(pts[i], pts[i + 1])
+            _stroke_quad(ctx, mid_a, pts[i], mid_b, pts[i][2])
+
+    def _configure_stroke_ctx(self, ctx: cairo.Context, stroke: Stroke) -> None:
         if stroke.tool is Tool.ERASER:
             ctx.set_operator(cairo.OPERATOR_CLEAR)
         else:
@@ -358,13 +393,52 @@ class InkBoard:
             ctx.set_source_rgba(*stroke.color)
         ctx.set_line_cap(cairo.LINE_CAP_ROUND)
         ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-        x0, y0, _w0 = stroke.points[from_index - 1]
-        x1, y1, w1 = stroke.points[from_index]
-        ctx.set_line_width(w1)
-        ctx.move_to(x0, y0)
-        ctx.line_to(x1, y1)
-        ctx.stroke()
 
     def _emit_changed(self) -> None:
         if self.on_changed:
             self.on_changed()
+
+
+def _midpoint(
+    a: tuple[float, float, float], b: tuple[float, float, float]
+) -> tuple[float, float]:
+    return ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
+
+
+def _stroke_line(
+    ctx: cairo.Context,
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> None:
+    ctx.set_line_width(b[2])
+    ctx.move_to(a[0], a[1])
+    ctx.line_to(b[0], b[1])
+    ctx.stroke()
+
+
+def _stroke_quad(
+    ctx: cairo.Context,
+    start: tuple[float, float],
+    control: tuple[float, float, float],
+    end: tuple[float, float],
+    width: float,
+) -> None:
+    # Pull the control point toward the chord so corners stay intentional
+    # instead of ballooning into overly round arcs.
+    t = _CURVE_TENSION
+    chord_x = (start[0] + end[0]) * 0.5
+    chord_y = (start[1] + end[1]) * 0.5
+    cx = chord_x + t * (control[0] - chord_x)
+    cy = chord_y + t * (control[1] - chord_y)
+    ctx.set_line_width(width)
+    ctx.move_to(start[0], start[1])
+    ctx.curve_to(
+        # Approximate a quadratic Bezier with a cubic for Cairo.
+        start[0] + (2.0 / 3.0) * (cx - start[0]),
+        start[1] + (2.0 / 3.0) * (cy - start[1]),
+        end[0] + (2.0 / 3.0) * (cx - end[0]),
+        end[1] + (2.0 / 3.0) * (cy - end[1]),
+        end[0],
+        end[1],
+    )
+    ctx.stroke()

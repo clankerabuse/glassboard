@@ -293,6 +293,7 @@ class Toolbar(Gtk.EventBox):
         on_drag_begin: Callable[[], None] | None = None,
         on_drag_end: Callable[[], None] | None = None,
         on_layout_changed: Callable[[], None] | None = None,
+        on_pointer_chrome: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__()
         self.set_visible_window(True)
@@ -309,6 +310,7 @@ class Toolbar(Gtk.EventBox):
         self._on_drag_begin = on_drag_begin
         self._on_drag_end = on_drag_end
         self._on_layout_changed = on_layout_changed
+        self._on_pointer_chrome = on_pointer_chrome
         self._draw_mode = False
         self._board_open = False
         self._board_color = BOARD_COLOR_DEFAULT
@@ -564,7 +566,30 @@ class Toolbar(Gtk.EventBox):
         # its normal style.
         self._strip_backdrop()
 
+        # Tell the overlay when the pointer is over chrome so eraser size
+        # preview can hide (parent leave/motion is unreliable here).
+        self.add_events(
+            Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.connect("enter-notify-event", self._on_chrome_enter)
+        self.connect("leave-notify-event", self._on_chrome_leave)
+
         self.show_all()
+
+    def _on_chrome_enter(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
+        # Ignore inferior enters (pointer moved between child buttons).
+        if event.detail == Gdk.NotifyType.INFERIOR:
+            return False
+        if self._on_pointer_chrome is not None:
+            self._on_pointer_chrome(True)
+        return False
+
+    def _on_chrome_leave(self, _w: Gtk.Widget, event: Gdk.EventCrossing) -> bool:
+        if event.detail == Gdk.NotifyType.INFERIOR:
+            return False
+        if self._on_pointer_chrome is not None:
+            self._on_pointer_chrome(False)
+        return False
 
     def _disable_focus_rings(self) -> None:
         def walk(widget: Gtk.Widget) -> None:
