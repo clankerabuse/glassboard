@@ -54,6 +54,7 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - Eraser also shows a size ring around the cursor while drawing
   - Eraser auto-grows while a stroke is held and moving consistently at a decent speed; pausing or slowing freezes the size (slider base is unchanged)
   - **Hide / Show** markings (eye icon) — toggles ink visibility without clearing; drawing while hidden reveals them again
+  - **Save / Load** (floppy icon) — popover with Save, Save as…, Load…, and a recent-files list (hover for a stroke preview). Files are `.glassboard` JSON; the last folder is remembered. Loading replaces the board; if you already have markings, you are asked to save first
   - Undo, Clear, Quit
   - **Drag handle** (vertical dots, grab-hand cursor): drag to reposition the toolbar
 - **System tray** (when AppIndicator is installed): **Show** / **Hide** / **Quit**. Esc in Click mode hides to the tray instead of exiting; tray **Quit** (or toolbar Quit) exits fully.

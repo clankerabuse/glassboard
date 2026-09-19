@@ -121,3 +121,49 @@ def save_tool_widths(widths: dict[str, float]) -> None:
             }
         }
     )
+
+
+_RECENT_STROKES_MAX = 4
+
+
+def load_strokes_last_dir() -> Path | None:
+    """Last directory used for stroke save/load, if it still exists."""
+    raw = _read_settings().get("strokes_last_dir")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_dir() else None
+
+
+def load_strokes_recent() -> list[Path]:
+    """Recent stroke document paths (may include missing files)."""
+    raw = _read_settings().get("strokes_recent")
+    if not isinstance(raw, list):
+        return []
+    out: list[Path] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(Path(item).expanduser())
+    return out
+
+
+def remember_strokes_path(path: Path) -> None:
+    """Record a successful save/load path (last dir + recent list)."""
+    path = path.expanduser().resolve()
+    recent = [str(path)]
+    for old in load_strokes_recent():
+        try:
+            resolved = old.expanduser().resolve()
+        except OSError:
+            resolved = old.expanduser()
+        if resolved == path:
+            continue
+        recent.append(str(resolved))
+        if len(recent) >= _RECENT_STROKES_MAX:
+            break
+    _write_settings(
+        {
+            "strokes_last_dir": str(path.parent),
+            "strokes_recent": recent,
+        }
+    )
