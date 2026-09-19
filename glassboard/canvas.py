@@ -30,11 +30,10 @@ COLORS: dict[str, tuple[float, float, float, float]] = {
     "yellow": (0.98, 0.82, 0.12, INK_ALPHA),
 }
 
-# Four toolbar slots (left → right). Customized colors persist via config.
+# Three toolbar slots (left → right). Customized colors persist via config.
 DEFAULT_SWATCHES: tuple[tuple[float, float, float, float], ...] = (
     COLORS["red"],
     COLORS["blue"],
-    COLORS["green"],
     COLORS["yellow"],
 )
 
