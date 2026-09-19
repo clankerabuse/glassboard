@@ -63,11 +63,14 @@ def _normalize_rgba(
     return (r, g, b, a)
 
 
+_SWATCH_COUNT = len(DEFAULT_SWATCHES)
+
+
 def load_swatches() -> list[tuple[float, float, float, float]]:
-    """Return four RGBA swatches, falling back to defaults on any error."""
+    """Return three RGBA swatches, falling back to defaults on any error."""
     defaults = [tuple(c) for c in DEFAULT_SWATCHES]
     raw = _read_settings().get("swatches")
-    if not isinstance(raw, list) or len(raw) != 4:
+    if not isinstance(raw, list) or len(raw) != _SWATCH_COUNT:
         return defaults
     parsed: list[tuple[float, float, float, float]] = []
     for item in raw:
@@ -79,9 +82,9 @@ def load_swatches() -> list[tuple[float, float, float, float]]:
 
 
 def save_swatches(swatches: list[tuple[float, float, float, float]]) -> None:
-    """Persist the four swatch colors."""
-    if len(swatches) != 4:
-        raise ValueError("expected exactly 4 swatches")
+    """Persist the three swatch colors."""
+    if len(swatches) != _SWATCH_COUNT:
+        raise ValueError(f"expected exactly {_SWATCH_COUNT} swatches")
     _write_settings(
         {"swatches": [[round(c, 4) for c in rgba] for rgba in swatches]}
     )
