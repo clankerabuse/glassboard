@@ -114,6 +114,62 @@ def _draw_eye_icon(cr: cairo.Context, size: int, *, open_: bool) -> None:
         cr.stroke()
 
 
+def _draw_save_icon(cr: cairo.Context, size: int) -> None:
+    """Classic 3.5\" floppy disk glyph (static pixbuf)."""
+    s = float(size)
+    pad = s * 0.14
+    x, y = pad, pad
+    w = s - 2 * pad
+    h = s - 2 * pad
+    # Chamfer the top-right corner (plastic shell).
+    cut = w * 0.18
+
+    cr.new_path()
+    cr.move_to(x, y)
+    cr.line_to(x + w - cut, y)
+    cr.line_to(x + w, y + cut)
+    cr.line_to(x + w, y + h)
+    cr.line_to(x, y + h)
+    cr.close_path()
+    cr.set_source_rgba(0.92, 0.92, 0.96, 1.0)
+    cr.fill_preserve()
+    cr.set_line_width(max(1.0, s * 0.06))
+    cr.set_source_rgba(0.12, 0.12, 0.16, 1.0)
+    cr.stroke()
+
+    # Metal shutter (top band).
+    shut_h = h * 0.28
+    cr.rectangle(x + w * 0.12, y + h * 0.08, w * 0.76, shut_h)
+    cr.set_source_rgba(0.55, 0.58, 0.64, 1.0)
+    cr.fill_preserve()
+    cr.set_source_rgba(0.12, 0.12, 0.16, 1.0)
+    cr.stroke()
+    # Shutter slot.
+    cr.set_line_width(max(1.0, s * 0.05))
+    cr.move_to(x + w * 0.38, y + h * 0.08 + shut_h * 0.35)
+    cr.line_to(x + w * 0.38, y + h * 0.08 + shut_h * 0.75)
+    cr.stroke()
+
+    # Paper label.
+    lx = x + w * 0.14
+    ly = y + h * 0.48
+    lw = w * 0.72
+    lh = h * 0.38
+    cr.rectangle(lx, ly, lw, lh)
+    cr.set_source_rgba(0.98, 0.98, 1.0, 1.0)
+    cr.fill_preserve()
+    cr.set_source_rgba(0.12, 0.12, 0.16, 1.0)
+    cr.stroke()
+    # Label lines.
+    cr.set_line_width(max(1.0, s * 0.045))
+    cr.set_source_rgba(0.55, 0.55, 0.60, 1.0)
+    for frac in (0.28, 0.50, 0.72):
+        yy = ly + lh * frac
+        cr.move_to(lx + lw * 0.12, yy)
+        cr.line_to(lx + lw * 0.88, yy)
+        cr.stroke()
+
+
 def _draw_eraser_icon(cr: cairo.Context, size: int) -> None:
     """Draw a large diagonal eraser icon filling the square."""
     s = size
@@ -303,6 +359,10 @@ class Toolbar(Gtk.EventBox):
         on_quit: Callable[[], None],
         on_board: Callable[[bool, str], None] | None = None,
         on_ink_visible: Callable[[bool], None] | None = None,
+        on_save: Callable[[], None] | None = None,
+        on_save_as: Callable[[], None] | None = None,
+        on_load: Callable[[], None] | None = None,
+        on_load_path: Callable[[str], None] | None = None,
         on_moved: Callable[[], None] | None = None,
         on_drag_begin: Callable[[], None] | None = None,
         on_drag_end: Callable[[], None] | None = None,
@@ -320,6 +380,10 @@ class Toolbar(Gtk.EventBox):
         self._on_width = on_width
         self._on_board = on_board
         self._on_ink_visible = on_ink_visible
+        self._on_save = on_save
+        self._on_save_as = on_save_as
+        self._on_load = on_load
+        self._on_load_path = on_load_path
         self._on_moved = on_moved
         self._on_drag_begin = on_drag_begin
         self._on_drag_end = on_drag_end
@@ -329,6 +393,10 @@ class Toolbar(Gtk.EventBox):
         self._board_open = False
         self._board_color = BOARD_COLOR_DEFAULT
         self._ink_visible = True
+        self._has_strokes = False
+        self._has_document = False
+        self._save_popover: Gtk.Popover | None = None
+        self._preview_popover: Gtk.Popover | None = None
         self._tool = Tool.PEN
         saved_widths = load_tool_widths()
         self._tool_widths: dict[Tool, float] = {
@@ -399,6 +467,61 @@ class Toolbar(Gtk.EventBox):
             }
             .glassboard-toolbar .ink-visible.ink-hidden {
                 background-color: rgba(255, 255, 255, 0.18);
+            }
+            .glassboard-save-menu {
+                background-color: rgb(18, 18, 22);
+                border: 1px solid rgb(46, 46, 50);
+                border-radius: 10px;
+                padding: 0;
+                min-width: 200px;
+                opacity: 1;
+            }
+            popover.glassboard-save-menu,
+            popover.glassboard-save-menu.background {
+                background-color: rgb(18, 18, 22);
+                border: 1px solid rgb(46, 46, 50);
+                border-radius: 10px;
+                opacity: 1;
+            }
+            .glassboard-save-menu-plate {
+                background-color: rgb(18, 18, 22);
+                border-radius: 10px;
+                padding: 6px;
+            }
+            .glassboard-save-menu button {
+                min-width: 180px;
+                min-height: 28px;
+                padding: 4px 8px;
+                border-radius: 6px;
+                font-size: 12px;
+                color: #f2f2f4;
+                background: transparent;
+                border: none;
+            }
+            .glassboard-save-menu button:hover {
+                background-color: rgba(255, 255, 255, 0.10);
+            }
+            .glassboard-save-menu .recent-label {
+                color: rgba(242, 242, 244, 0.55);
+                font-size: 10px;
+                padding: 6px 4px 2px 4px;
+            }
+            .glassboard-save-menu button.recent-item {
+                font-size: 11px;
+            }
+            .glassboard-preview,
+            popover.glassboard-preview,
+            popover.glassboard-preview.background {
+                background-color: rgb(18, 18, 22);
+                border-radius: 8px;
+                border: 1px solid rgb(46, 46, 50);
+                padding: 4px;
+                opacity: 1;
+            }
+            .glassboard-preview-plate {
+                background-color: rgb(18, 18, 22);
+                border-radius: 8px;
+                padding: 4px;
             }
             .glassboard-toolbar .swatch {
                 min-width: 22px;
@@ -562,6 +685,14 @@ class Toolbar(Gtk.EventBox):
         )
         root.pack_start(self._btn_ink_visible, False, False, 0)
 
+        self._btn_save = _cairo_icon_button(
+            "Save / load markings",
+            "mode-save",
+            _draw_save_icon,
+        )
+        self._btn_save.connect("clicked", self._on_save_clicked)
+        root.pack_start(self._btn_save, False, False, 0)
+
         undo_btn = Gtk.Button(label="Undo")
         undo_btn.connect("clicked", lambda *_: on_undo())
         clear_btn = Gtk.Button(label="Clear")
@@ -620,13 +751,17 @@ class Toolbar(Gtk.EventBox):
         return False
 
     def _disable_focus_rings(self) -> None:
+        self._disable_focus_rings_on(self)
+
+    @staticmethod
+    def _disable_focus_rings_on(root: Gtk.Widget) -> None:
         def walk(widget: Gtk.Widget) -> None:
             widget.set_can_focus(False)
             if isinstance(widget, Gtk.Container):
                 for child in widget.get_children():
                     walk(child)
 
-        walk(self)
+        walk(root)
 
     def _strip_backdrop(self) -> None:
         def on_state_changed(widget: Gtk.Widget, _old: Gtk.StateFlags) -> None:
@@ -973,6 +1108,168 @@ class Toolbar(Gtk.EventBox):
             ctx.remove_class("ink-hidden")
         else:
             ctx.add_class("ink-hidden")
+
+    def set_strokes_session(
+        self, *, has_strokes: bool, has_document: bool
+    ) -> None:
+        """Keep Save / Save as… sensitivity in sync with the overlay session."""
+        self._has_strokes = bool(has_strokes)
+        self._has_document = bool(has_document)
+
+    def _on_save_clicked(self, *_args) -> None:
+        # File dialogs / desktop need click-through — leave Draw immediately.
+        self.set_draw_mode(False, emit=True)
+        self._close_preview_popover()
+        if self._save_popover is not None:
+            self._save_popover.popdown()
+            return
+        popover = Gtk.Popover.new(self._btn_save)
+        popover.set_position(Gtk.PositionType.TOP)
+        popover.get_style_context().add_class("glassboard-save-menu")
+
+        # Opaque plate — theme popovers are often translucent and would show
+        # ink strokes through the menu on the transparent overlay.
+        plate = Gtk.EventBox()
+        plate.set_visible_window(True)
+        plate.get_style_context().add_class("glassboard-save-menu-plate")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        save_btn = Gtk.Button(label="Save")
+        save_btn.set_sensitive(self._has_strokes)
+        save_btn.set_halign(Gtk.Align.FILL)
+        save_btn.connect("clicked", self._on_menu_save)
+        box.pack_start(save_btn, False, False, 0)
+
+        save_as_btn = Gtk.Button(label="Save as…")
+        save_as_btn.set_sensitive(self._has_strokes)
+        save_as_btn.set_halign(Gtk.Align.FILL)
+        save_as_btn.connect("clicked", self._on_menu_save_as)
+        box.pack_start(save_as_btn, False, False, 0)
+
+        load_btn = Gtk.Button(label="Load…")
+        load_btn.set_halign(Gtk.Align.FILL)
+        load_btn.connect("clicked", self._on_menu_load)
+        box.pack_start(load_btn, False, False, 0)
+
+        from glassboard.strokes_file import list_recent_strokes
+
+        recent = list_recent_strokes()
+        if recent:
+            box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+            label = Gtk.Label(label="Recent", xalign=0.0)
+            label.get_style_context().add_class("recent-label")
+            box.pack_start(label, False, False, 0)
+            for path in recent:
+                item = Gtk.Button(label=path.name)
+                item.set_tooltip_text(str(path))
+                item.set_halign(Gtk.Align.FILL)
+                item.get_style_context().add_class("recent-item")
+                item.connect(
+                    "clicked",
+                    lambda _b, p=str(path): self._on_menu_load_path(p),
+                )
+                item.connect(
+                    "enter-notify-event",
+                    lambda w, _e, p=path: self._on_recent_enter(w, p),
+                )
+                item.connect(
+                    "leave-notify-event",
+                    lambda *_a: self._on_recent_leave(),
+                )
+                box.pack_start(item, False, False, 0)
+
+        plate.add(box)
+        popover.add(plate)
+        popover.connect("closed", self._on_save_popover_closed)
+        plate.show_all()
+        self._save_popover = popover
+        self._disable_focus_rings_on(plate)
+        popover.popup()
+
+    def _on_save_popover_closed(self, popover: Gtk.Popover, *_args) -> None:
+        self._close_preview_popover()
+        self._save_popover = None
+        popover.destroy()
+
+    def _close_save_popover(self) -> None:
+        if self._save_popover is not None:
+            self._save_popover.popdown()
+
+    def _on_menu_save(self, *_args) -> None:
+        self._close_save_popover()
+        if self._on_save is not None:
+            self._on_save()
+
+    def _on_menu_save_as(self, *_args) -> None:
+        self._close_save_popover()
+        if self._on_save_as is not None:
+            self._on_save_as()
+
+    def _on_menu_load(self, *_args) -> None:
+        self._close_save_popover()
+        if self._on_load is not None:
+            self._on_load()
+
+    def _on_menu_load_path(self, path: str) -> None:
+        self._close_save_popover()
+        if self._on_load_path is not None:
+            self._on_load_path(path)
+
+    def _on_recent_enter(self, widget: Gtk.Widget, path) -> bool:
+        self._show_preview_for(widget, path)
+        return False
+
+    def _on_recent_leave(self) -> bool:
+        self._close_preview_popover()
+        return False
+
+    def _show_preview_for(self, relative_to: Gtk.Widget, path) -> None:
+        self._close_preview_popover()
+        from glassboard.strokes_file import (
+            StrokesFileError,
+            load_strokes,
+            render_strokes_preview,
+        )
+
+        try:
+            strokes = load_strokes(path, remember=False)
+        except (OSError, StrokesFileError):
+            return
+        surface = render_strokes_preview(strokes)
+        pixbuf = Gdk.pixbuf_get_from_surface(
+            surface, 0, 0, surface.get_width(), surface.get_height()
+        )
+        if pixbuf is None:
+            return
+
+        popover = Gtk.Popover.new(relative_to)
+        popover.set_position(Gtk.PositionType.RIGHT)
+        popover.set_modal(False)
+        popover.get_style_context().add_class("glassboard-preview")
+        plate = Gtk.EventBox()
+        plate.set_visible_window(True)
+        plate.get_style_context().add_class("glassboard-preview-plate")
+        image = Gtk.Image.new_from_pixbuf(pixbuf)
+        image.set_margin_start(2)
+        image.set_margin_end(2)
+        image.set_margin_top(2)
+        image.set_margin_bottom(2)
+        plate.add(image)
+        popover.add(plate)
+        plate.show_all()
+        self._preview_popover = popover
+        popover.popup()
+
+    def _close_preview_popover(self) -> None:
+        if self._preview_popover is not None:
+            self._preview_popover.popdown()
+            self._preview_popover.destroy()
+            self._preview_popover = None
 
     # --- drag handle --------------------------------------------------------
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import cairo
 
@@ -25,6 +26,14 @@ from glassboard.input_region import (
     set_passthrough_input,
     start_input_watchdog,
     stop_input_watchdog,
+)
+from glassboard.strokes_file import (
+    FILE_EXTENSION,
+    StrokesFileError,
+    default_strokes_dir,
+    load_strokes,
+    save_strokes,
+    strokes_chooser_dir,
 )
 from glassboard.toolbar import Toolbar
 
@@ -83,7 +92,8 @@ class OverlayWindow(Gtk.Window):
         # Ink is painted on the window itself — no fullscreen child widget that
         # can steal clicks from the toolbar.
         self._ink = InkBoard()
-        self._ink.on_changed = self.queue_draw
+        self._ink.on_changed = self._on_ink_changed
+        self._strokes_path: Path | None = None
 
         self._overlay = Gtk.Overlay()
         self._overlay.set_app_paintable(True)
@@ -104,6 +114,10 @@ class OverlayWindow(Gtk.Window):
             on_quit=self.quit_app,
             on_board=self._set_board_open,
             on_ink_visible=self._set_ink_visible,
+            on_save=self._save_strokes,
+            on_save_as=self._save_strokes_as,
+            on_load=self._load_strokes_dialog,
+            on_load_path=self._load_strokes_path,
             on_moved=self._on_toolbar_moved,
             on_drag_begin=self._on_toolbar_drag_begin,
             on_drag_end=self._on_toolbar_drag_end,
@@ -164,6 +178,7 @@ class OverlayWindow(Gtk.Window):
         self._color_hold_source: int | None = None
         self._ink_visible = True
         self._set_draw_mode(False)
+        self._sync_strokes_session()
 
     def set_tray(self, tray) -> None:
         self._tray = tray
@@ -233,6 +248,182 @@ class OverlayWindow(Gtk.Window):
     def _clear(self) -> None:
         self._ink.clear()
         self.queue_draw()
+
+    def _on_ink_changed(self) -> None:
+        self._sync_strokes_session()
+        self.queue_draw()
+
+    def _sync_strokes_session(self) -> None:
+        self._toolbar.set_strokes_session(
+            has_strokes=self._ink.has_strokes(),
+            has_document=self._strokes_path is not None,
+        )
+
+    def _save_strokes(self) -> None:
+        if not self._ink.has_strokes():
+            return
+        if self._strokes_path is None:
+            self._save_strokes_as()
+            return
+        self._write_strokes_to(self._strokes_path)
+
+    def _save_strokes_as(self) -> bool:
+        """Prompt for a path and save. Returns True on success."""
+        if not self._ink.has_strokes():
+            return False
+        path = self._choose_strokes_path(save=True)
+        if path is None:
+            return False
+        return self._write_strokes_to(path)
+
+    def _write_strokes_to(self, path: Path) -> bool:
+        try:
+            written = save_strokes(path, self._ink.export_strokes())
+        except OSError as exc:
+            self._show_strokes_error("Could not save markings", str(exc))
+            return False
+        self._strokes_path = written
+        self._sync_strokes_session()
+        return True
+
+    def _load_strokes_dialog(self) -> None:
+        self._confirm_before_load(lambda: self._run_load_chooser())
+
+    def _load_strokes_path(self, path_str: str) -> None:
+        path = Path(path_str)
+        self._confirm_before_load(lambda: self._apply_loaded_strokes(path))
+
+    def _confirm_before_load(self, then) -> None:
+        """Ask to save existing ink before replacing it via *then*."""
+        if not self._ink.has_strokes():
+            then()
+            return
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Save current markings before loading?",
+        )
+        dialog.format_secondary_text(
+            "Loading replaces everything on the board."
+        )
+        # ACCEPT = Save, REJECT = Don't Save (avoid YES/NO alias quirks).
+        dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Don't Save", Gtk.ResponseType.REJECT)
+        dialog.add_button("_Save", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+        response = dialog.run()
+        dialog.destroy()
+
+        if response in (
+            Gtk.ResponseType.CANCEL,
+            Gtk.ResponseType.DELETE_EVENT,
+            Gtk.ResponseType.CLOSE,
+        ):
+            return
+
+        if response == Gtk.ResponseType.ACCEPT:
+            # Nested Native file choosers race if opened in the same turn as
+            # this MessageDialog's teardown — defer so Save As actually shows
+            # and only then continue to Load.
+            def save_then(_=None):
+                if self._save_strokes_as():
+                    then()
+                return False
+
+            GLib.idle_add(save_then)
+            return
+
+        if response == Gtk.ResponseType.REJECT:
+            GLib.idle_add(lambda: (then(), False)[1])
+
+    def _run_load_chooser(self) -> None:
+        path = self._choose_strokes_path(save=False)
+        if path is None:
+            return
+        self._apply_loaded_strokes(path)
+
+    def _apply_loaded_strokes(self, path: Path) -> None:
+        try:
+            strokes = load_strokes(path, remember=True)
+        except (OSError, StrokesFileError) as exc:
+            self._show_strokes_error("Could not load markings", str(exc))
+            return
+        self._ink.replace_strokes(strokes)
+        self._strokes_path = path.expanduser().resolve()
+        self._ensure_ink_visible()
+        self._sync_strokes_session()
+        self.queue_draw()
+
+    def _choose_strokes_path(self, *, save: bool) -> Path | None:
+        action = (
+            Gtk.FileChooserAction.SAVE
+            if save
+            else Gtk.FileChooserAction.OPEN
+        )
+        title = "Save markings" if save else "Load markings"
+        # FileChooserDialog (not Native): portal/native choosers often fail to
+        # show or race when the parent is a gtk-layer-shell overlay.
+        dialog = Gtk.FileChooserDialog(
+            title=title,
+            parent=self,
+            action=action,
+        )
+        dialog.add_buttons(
+            "_Cancel",
+            Gtk.ResponseType.CANCEL,
+            "_Save" if save else "_Open",
+            Gtk.ResponseType.ACCEPT,
+        )
+        dialog.set_modal(True)
+        filt = Gtk.FileFilter()
+        filt.set_name("Glassboard strokes (*.glassboard)")
+        filt.add_pattern(f"*{FILE_EXTENSION}")
+        dialog.add_filter(filt)
+        all_filt = Gtk.FileFilter()
+        all_filt.set_name("All files")
+        all_filt.add_pattern("*")
+        dialog.add_filter(all_filt)
+
+        if save:
+            try:
+                default_strokes_dir().mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        folder = strokes_chooser_dir()
+        dialog.set_current_folder(str(folder))
+        if save:
+            suggested = (
+                self._strokes_path.name
+                if self._strokes_path is not None
+                else f"markings{FILE_EXTENSION}"
+            )
+            dialog.set_current_name(suggested)
+            dialog.set_do_overwrite_confirmation(True)
+
+        response = dialog.run()
+        filename = dialog.get_filename()
+        dialog.destroy()
+        if response != Gtk.ResponseType.ACCEPT or not filename:
+            return None
+        path = Path(filename)
+        if save and path.suffix.lower() != FILE_EXTENSION:
+            path = path.with_suffix(FILE_EXTENSION)
+        return path
+
+    def _show_strokes_error(self, title: str, detail: str) -> None:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
+        )
+        dialog.format_secondary_text(detail)
+        dialog.run()
+        dialog.destroy()
 
     def _set_ink_visible(self, visible: bool) -> None:
         self._ink_visible = bool(visible)

@@ -152,6 +152,37 @@ class InkBoard:
             self._active = None
             self._reset_eraser_grow()
 
+    def has_strokes(self) -> bool:
+        return bool(self._strokes)
+
+    def export_strokes(self) -> list[Stroke]:
+        """Return a shallow copy of committed strokes (not the live tip)."""
+        return [
+            Stroke(
+                tool=s.tool,
+                color=s.color,
+                width=s.width,
+                points=list(s.points),
+            )
+            for s in self._strokes
+        ]
+
+    def replace_strokes(self, strokes: list[Stroke]) -> None:
+        """Replace all ink with *strokes* (complete load)."""
+        self._active = None
+        self._reset_eraser_grow()
+        self._strokes = [
+            Stroke(
+                tool=s.tool,
+                color=s.color,
+                width=s.width,
+                points=list(s.points),
+            )
+            for s in strokes
+        ]
+        self._replay()
+        self._emit_changed()
+
     def undo(self) -> None:
         if not self._strokes:
             return
