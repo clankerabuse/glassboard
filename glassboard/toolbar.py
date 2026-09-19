@@ -905,6 +905,17 @@ class Toolbar(Gtk.EventBox):
         self._set_width(nxt, emit=True)
         self._ensure_draw_mode()
 
+    def cycle_color(self, delta: int = 1) -> None:
+        """Step through swatches (stylus button-2 hold + horizontal nudge)."""
+        n = len(self._swatches)
+        if n <= 0 or delta == 0:
+            return
+        self._select_color((self._color_slot + int(delta)) % n, emit=True)
+
+    def select_current_color(self) -> None:
+        """Re-apply the active swatch (forces Pen) without changing the slot."""
+        self._select_color(self._color_slot, emit=True)
+
     def _on_size_changed(self, scale: Gtk.Scale) -> None:
         width = max(WIDTH_MIN, min(max_width_for_tool(self._tool), scale.get_value()))
         self._tool_widths[self._tool] = width

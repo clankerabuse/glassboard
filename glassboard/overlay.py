@@ -44,6 +44,11 @@ _SIZE_SOFT_ZONE_MAX = 8.0
 _SIZE_GESTURE_D_REF = 100.0
 _SIZE_GESTURE_GAMMA = 2.2
 
+# Stylus button-2: short click toggles pen/eraser; hold then swipe cycles colors.
+_TOOL_BTN_HOLD_MS = 500
+# Horizontal tip travel (px) per swatch step while the hold-color gesture is live.
+_COLOR_GESTURE_STEP_PX = 56.0
+
 
 def _width_from_size_gesture_dist(dist: float, width_max: float) -> float:
     """Map tip distance from the press point onto stroke width (soft zone + curve)."""
@@ -151,6 +156,12 @@ class OverlayWindow(Gtk.Window):
         self._size_anchor: tuple[float, float] | None = None
         self._size_pointer: tuple[float, float] | None = None
         self._size_dragged = False
+        # Stylus button-2: pending hold → color cycle, or quick release → tool toggle.
+        self._tool_btn_armed = False
+        self._tool_btn_origin: tuple[float, float] | None = None
+        self._color_gesture_active = False
+        self._color_gesture_x = 0.0
+        self._color_hold_source: int | None = None
         self._ink_visible = True
         self._set_draw_mode(False)
 
@@ -164,6 +175,7 @@ class OverlayWindow(Gtk.Window):
     def hide_to_tray(self) -> None:
         """Dismiss the overlay but keep the process alive for the tray icon."""
         self._end_size_gesture()
+        self._end_tool_btn_gesture(commit=False)
         if self._toolbar.has_pointer_capture():
             self._toolbar.end_pointer_capture()
         if self._toolbar.is_board_open():
@@ -184,6 +196,7 @@ class OverlayWindow(Gtk.Window):
             self._tray.sync_menu()
 
     def _on_destroy(self, *_args) -> None:
+        self._end_tool_btn_gesture(commit=False)
         stop_input_watchdog()
         if self._board.get_realized():
             self._board.destroy()
@@ -722,13 +735,68 @@ class OverlayWindow(Gtk.Window):
         self._invalidate_size_pointer(old_tip, self._size_pointer)
         return True
 
+    def _begin_tool_btn_gesture(self, x: float, y: float) -> None:
+        """Arm stylus button-2: short click toggles tools; hold enters color cycle."""
+        self._end_tool_btn_gesture(commit=False)
+        self._toolbar._ensure_draw_mode()
+        self._tool_btn_armed = True
+        self._tool_btn_origin = (x, y)
+        self._color_gesture_active = False
+        self._color_gesture_x = x
+        self._color_hold_source = GLib.timeout_add(
+            _TOOL_BTN_HOLD_MS, self._on_color_hold_timeout
+        )
+
+    def _on_color_hold_timeout(self) -> bool:
+        """After a long press, switch to Pen and start left/right color cycling."""
+        self._color_hold_source = None
+        if not self._tool_btn_armed or self._color_gesture_active:
+            return False
+        self._color_gesture_active = True
+        # Pen + current swatch; left/right motion then steps through slots.
+        self._toolbar.select_current_color()
+        if self._cursor_pos is not None:
+            self._color_gesture_x = self._cursor_pos[0]
+        elif self._tool_btn_origin is not None:
+            self._color_gesture_x = self._tool_btn_origin[0]
+        return False
+
+    def _end_tool_btn_gesture(self, *, commit: bool = False) -> None:
+        if self._color_hold_source is not None:
+            GLib.source_remove(self._color_hold_source)
+            self._color_hold_source = None
+        was_color = self._color_gesture_active
+        armed = self._tool_btn_armed
+        self._tool_btn_armed = False
+        self._tool_btn_origin = None
+        self._color_gesture_active = False
+        if commit and armed and not was_color:
+            nxt = Tool.ERASER if self._ink.tool is Tool.PEN else Tool.PEN
+            self._toolbar._select_tool(nxt)
+
+    def _update_color_gesture(self, x: float, y: float) -> bool:
+        """While button-2 is held past the hold threshold, nudge colors horizontally."""
+        if not self._tool_btn_armed:
+            return False
+        if not self._color_gesture_active:
+            # Still waiting on the hold timer — track tip for when it fires.
+            return True
+        dx = x - self._color_gesture_x
+        step = _COLOR_GESTURE_STEP_PX
+        if step <= 0:
+            return True
+        steps = int(dx / step)
+        if steps != 0:
+            self._toolbar.cycle_color(steps)
+            self._color_gesture_x += steps * step
+        return True
+
     def _on_stylus_button_press(self, event: Gdk.EventButton, x: float, y: float) -> bool:
-        """Barrel buttons: 2 toggles pen/eraser; 3 starts size adjust gesture."""
+        """Barrel buttons: 2 toggles pen/eraser (hold = color cycle); 3 sizes."""
         if not self._is_stylus_event(event):
             return False
         if event.button == 2:
-            nxt = Tool.ERASER if self._ink.tool is Tool.PEN else Tool.PEN
-            self._toolbar._select_tool(nxt)
+            self._begin_tool_btn_gesture(x, y)
             return True
         if event.button == 3:
             self._begin_size_gesture(x, y)
@@ -742,7 +810,7 @@ class OverlayWindow(Gtk.Window):
             return True
         if event.button != 1 or not self._ink.draw_enabled:
             return False
-        if self._size_anchor is not None:
+        if self._size_anchor is not None or self._tool_btn_armed:
             return True
         if self._event_over_toolbar(x, y):
             return False
@@ -758,6 +826,10 @@ class OverlayWindow(Gtk.Window):
         if event.button == 1 and self._toolbar.has_pointer_capture():
             self._toolbar.end_pointer_capture()
         x, y = self._event_coords(event)
+        if event.button == 2 and self._tool_btn_armed:
+            self._end_tool_btn_gesture(commit=True)
+            self._set_cursor_pos(x, y)
+            return True
         if event.button == 3 and self._size_anchor is not None:
             self._end_size_gesture(commit=True)
             self._set_cursor_pos(x, y)
@@ -778,6 +850,14 @@ class OverlayWindow(Gtk.Window):
         # press point matters — do not move _cursor_pos with the stylus.
         if self._size_anchor is not None:
             return self._update_size_gesture(x, y)
+        if self._tool_btn_armed:
+            old = self._set_cursor_pos(x, y)
+            handled = self._update_color_gesture(x, y)
+            if old != self._cursor_pos and (
+                self._ink.tool is Tool.ERASER or self._show_brush_size_cursor()
+            ):
+                self._invalidate_cursor(old, self._cursor_pos)
+            return handled
         old = self._set_cursor_pos(x, y)
         handled = False
         if event.state & Gdk.ModifierType.BUTTON1_MASK:
@@ -798,6 +878,9 @@ class OverlayWindow(Gtk.Window):
         x, y = self._event_coords(event)
         if self._size_anchor is not None:
             return self._update_size_gesture(x, y)
+        if self._tool_btn_armed:
+            self._set_cursor_pos(x, y)
+            return self._update_color_gesture(x, y)
         old = self._set_cursor_pos(x, y)
         if old != self._cursor_pos and (
             self._ink.tool is Tool.ERASER or self._show_brush_size_cursor()
@@ -807,6 +890,7 @@ class OverlayWindow(Gtk.Window):
 
     def _on_leave(self, _w: Gtk.Widget, _event: Gdk.EventCrossing) -> bool:
         self._end_size_gesture()
+        self._end_tool_btn_gesture(commit=False)
         old = self._cursor_pos
         self._cursor_pos = None
         self._invalidate_cursor(old)
