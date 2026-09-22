@@ -84,7 +84,12 @@ class OverlayWindow(Gtk.Window):
         self.set_title("Glassboard")
         self.set_decorated(False)
         self.set_app_paintable(True)
-        self.set_keep_above(True)
+        # Layer-shell OVERLAY already stacks above apps. keep_above / focus-on-map
+        # make Plasma raise unrelated windows when this surface appears.
+        self.set_focus_on_map(False)
+        self.set_accept_focus(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
 
         self._prepare_transparent_visual()
         self._init_layer_shell()
@@ -94,6 +99,8 @@ class OverlayWindow(Gtk.Window):
         self._ink = InkBoard()
         self._ink.on_changed = self._on_ink_changed
         self._strokes_path: Path | None = None
+        self._strokes_dirty = False
+        self._strokes_loading = False
 
         self._overlay = Gtk.Overlay()
         self._overlay.set_app_paintable(True)
@@ -177,6 +184,10 @@ class OverlayWindow(Gtk.Window):
         self._color_gesture_x = 0.0
         self._color_hold_source: int | None = None
         self._ink_visible = True
+        # While >0, the solid board is hidden so modal dialogs aren't buried
+        # under its layer-shell TOP surface (normal GTK dialogs sit below it).
+        self._board_dialog_suspend_depth = 0
+        self._board_dialog_should_restore = False
         self._set_draw_mode(False)
         self._sync_strokes_session()
 
@@ -250,14 +261,44 @@ class OverlayWindow(Gtk.Window):
         self.queue_draw()
 
     def _on_ink_changed(self) -> None:
+        if not self._strokes_loading:
+            self._strokes_dirty = True
         self._sync_strokes_session()
         self.queue_draw()
+
+    def _mark_strokes_clean(self) -> None:
+        self._strokes_dirty = False
+        self._sync_strokes_session()
 
     def _sync_strokes_session(self) -> None:
         self._toolbar.set_strokes_session(
             has_strokes=self._ink.has_strokes(),
             has_document=self._strokes_path is not None,
+            dirty=self._strokes_dirty,
         )
+
+    def _begin_board_dialog_suspend(self) -> None:
+        """Hide the solid board so save/load dialogs aren't stuck underneath it.
+
+        Nested calls are refcounted so a save-then-load chain keeps the board
+        down until the whole flow finishes, then restores it if still wanted.
+        """
+        if self._board_dialog_suspend_depth == 0:
+            self._board_dialog_should_restore = bool(self._board.get_visible())
+            if self._board_dialog_should_restore:
+                self._board.hide()
+        self._board_dialog_suspend_depth += 1
+
+    def _end_board_dialog_suspend(self) -> None:
+        if self._board_dialog_suspend_depth <= 0:
+            self._board_dialog_suspend_depth = 0
+            return
+        self._board_dialog_suspend_depth -= 1
+        if self._board_dialog_suspend_depth > 0:
+            return
+        if self._board_dialog_should_restore and self._toolbar.is_board_open():
+            self._board.show_all()
+        self._board_dialog_should_restore = False
 
     def _save_strokes(self) -> None:
         if not self._ink.has_strokes():
@@ -283,7 +324,7 @@ class OverlayWindow(Gtk.Window):
             self._show_strokes_error("Could not save markings", str(exc))
             return False
         self._strokes_path = written
-        self._sync_strokes_session()
+        self._mark_strokes_clean()
         return True
 
     def _load_strokes_dialog(self) -> None:
@@ -295,17 +336,28 @@ class OverlayWindow(Gtk.Window):
 
     def _confirm_before_load(self, then) -> None:
         """Ask to save existing ink before replacing it via *then*."""
-        if not self._ink.has_strokes():
-            then()
+        # Keep the board down across this whole confirm → save? → load chain.
+        self._begin_board_dialog_suspend()
+
+        def finish(cont=None) -> None:
+            try:
+                if cont is not None:
+                    cont()
+            finally:
+                self._end_board_dialog_suspend()
+
+        if not self._strokes_dirty or not self._ink.has_strokes():
+            finish(then)
             return
 
         dialog = Gtk.MessageDialog(
-            transient_for=self,
+            transient_for=None,
             modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
             text="Save current markings before loading?",
         )
+        self._prepare_utility_dialog(dialog)
         dialog.format_secondary_text(
             "Loading replaces everything on the board."
         )
@@ -322,22 +374,29 @@ class OverlayWindow(Gtk.Window):
             Gtk.ResponseType.DELETE_EVENT,
             Gtk.ResponseType.CLOSE,
         ):
+            finish()
             return
 
         if response == Gtk.ResponseType.ACCEPT:
-            # Nested Native file choosers race if opened in the same turn as
-            # this MessageDialog's teardown — defer so Save As actually shows
+            # Nested file choosers race if opened in the same turn as this
+            # MessageDialog's teardown — defer so Save As actually shows
             # and only then continue to Load.
             def save_then(_=None):
-                if self._save_strokes_as():
-                    then()
+                try:
+                    if self._save_strokes_as():
+                        then()
+                finally:
+                    self._end_board_dialog_suspend()
                 return False
 
             GLib.idle_add(save_then)
             return
 
         if response == Gtk.ResponseType.REJECT:
-            GLib.idle_add(lambda: (then(), False)[1])
+            GLib.idle_add(lambda: (finish(then), False)[1])
+            return
+
+        finish()
 
     def _run_load_chooser(self) -> None:
         path = self._choose_strokes_path(save=False)
@@ -351,33 +410,44 @@ class OverlayWindow(Gtk.Window):
         except (OSError, StrokesFileError) as exc:
             self._show_strokes_error("Could not load markings", str(exc))
             return
-        self._ink.replace_strokes(strokes)
+        self._strokes_loading = True
+        try:
+            self._ink.replace_strokes(strokes)
+        finally:
+            self._strokes_loading = False
         self._strokes_path = path.expanduser().resolve()
+        self._mark_strokes_clean()
         self._ensure_ink_visible()
-        self._sync_strokes_session()
         self.queue_draw()
 
     def _choose_strokes_path(self, *, save: bool) -> Path | None:
+        self._begin_board_dialog_suspend()
+        try:
+            return self._choose_strokes_path_unlocked(save=save)
+        finally:
+            self._end_board_dialog_suspend()
+
+    def _choose_strokes_path_unlocked(self, *, save: bool) -> Path | None:
         action = (
             Gtk.FileChooserAction.SAVE
             if save
             else Gtk.FileChooserAction.OPEN
         )
         title = "Save markings" if save else "Load markings"
-        # FileChooserDialog (not Native): portal/native choosers often fail to
-        # show or race when the parent is a gtk-layer-shell overlay.
+        # No transient parent: parenting a dialog to the layer-shell overlay
+        # makes GTK present/activate it, and Plasma then raises other windows.
         dialog = Gtk.FileChooserDialog(
             title=title,
-            parent=self,
+            parent=None,
             action=action,
         )
+        self._prepare_utility_dialog(dialog)
         dialog.add_buttons(
             "_Cancel",
             Gtk.ResponseType.CANCEL,
             "_Save" if save else "_Open",
             Gtk.ResponseType.ACCEPT,
         )
-        dialog.set_modal(True)
         filt = Gtk.FileFilter()
         filt.set_name("Glassboard strokes (*.glassboard)")
         filt.add_pattern(f"*{FILE_EXTENSION}")
@@ -414,16 +484,31 @@ class OverlayWindow(Gtk.Window):
         return path
 
     def _show_strokes_error(self, title: str, detail: str) -> None:
-        dialog = Gtk.MessageDialog(
-            transient_for=self,
-            modal=True,
-            message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.OK,
-            text=title,
-        )
-        dialog.format_secondary_text(detail)
-        dialog.run()
-        dialog.destroy()
+        self._begin_board_dialog_suspend()
+        try:
+            dialog = Gtk.MessageDialog(
+                transient_for=None,
+                modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text=title,
+            )
+            self._prepare_utility_dialog(dialog)
+            dialog.format_secondary_text(detail)
+            dialog.run()
+            dialog.destroy()
+        finally:
+            self._end_board_dialog_suspend()
+
+    @staticmethod
+    def _prepare_utility_dialog(dialog: Gtk.Window) -> None:
+        """Configure save/load prompts so they don't disturb the desktop stack."""
+        dialog.set_modal(True)
+        dialog.set_skip_taskbar_hint(True)
+        dialog.set_skip_pager_hint(True)
+        # Keep the chooser above normal app windows (board is already suspended).
+        dialog.set_keep_above(True)
+        dialog.set_type_hint(Gdk.WindowTypeHint.DIALOG)
 
     def _set_ink_visible(self, visible: bool) -> None:
         self._ink_visible = bool(visible)
@@ -729,6 +814,9 @@ class OverlayWindow(Gtk.Window):
             old = self._cursor_pos
             self._cursor_pos = None
             self._invalidate_cursor(old)
+        # Only take focus while drawing (shortcuts); Click mode must not steal
+        # activation from other apps when the overlay maps or dialogs close.
+        self.set_accept_focus(enabled)
         if enabled:
             GtkLayerShell.set_keyboard_mode(
                 self, GtkLayerShell.KeyboardMode.EXCLUSIVE
@@ -1190,6 +1278,7 @@ def run(argv: list[str] | None = None) -> int:
             GLib.idle_add(win._ensure_toolbar_placed)
             return
         # Taskbar / launcher re-activation: restore if hidden to tray.
+        # show_all only — avoid present(), which raises unrelated windows on Plasma.
         win.show_from_tray()
 
     app.connect("activate", on_activate)
