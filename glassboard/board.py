@@ -20,6 +20,9 @@ class SolidBoardWindow(Gtk.Window):
     Uses exclusive_zone=0 so KWin/Plasma sizes it around the taskbar and other
     exclusive panels. Lives on Layer.TOP so the transparent glass Overlay
     (and its toolbar) stay above it.
+
+    Normal GTK dialogs (save/load prompts) sit below this layer, so the
+    overlay temporarily hides the board while those dialogs are open.
     """
 
     def __init__(self) -> None:
@@ -28,6 +31,9 @@ class SolidBoardWindow(Gtk.Window):
         self.set_decorated(False)
         self.set_app_paintable(True)
         self.set_accept_focus(False)
+        self.set_focus_on_map(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
         self._color_name = BOARD_COLOR_DEFAULT
 
         screen = self.get_screen()

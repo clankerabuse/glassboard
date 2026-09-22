@@ -395,6 +395,7 @@ class Toolbar(Gtk.EventBox):
         self._ink_visible = True
         self._has_strokes = False
         self._has_document = False
+        self._strokes_dirty = False
         self._save_popover: Gtk.Popover | None = None
         self._preview_popover: Gtk.Popover | None = None
         self._tool = Tool.PEN
@@ -1110,11 +1111,12 @@ class Toolbar(Gtk.EventBox):
             ctx.add_class("ink-hidden")
 
     def set_strokes_session(
-        self, *, has_strokes: bool, has_document: bool
+        self, *, has_strokes: bool, has_document: bool, dirty: bool = False
     ) -> None:
         """Keep Save / Save as… sensitivity in sync with the overlay session."""
         self._has_strokes = bool(has_strokes)
         self._has_document = bool(has_document)
+        self._strokes_dirty = bool(dirty)
 
     def _on_save_clicked(self, *_args) -> None:
         # File dialogs / desktop need click-through — leave Draw immediately.
@@ -1140,7 +1142,7 @@ class Toolbar(Gtk.EventBox):
         box.set_margin_bottom(4)
 
         save_btn = Gtk.Button(label="Save")
-        save_btn.set_sensitive(self._has_strokes)
+        save_btn.set_sensitive(self._has_strokes and self._strokes_dirty)
         save_btn.set_halign(Gtk.Align.FILL)
         save_btn.connect("clicked", self._on_menu_save)
         box.pack_start(save_btn, False, False, 0)
