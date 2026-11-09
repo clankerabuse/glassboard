@@ -2,7 +2,7 @@
 
 Transparent overlay whiteboard for Linux Wayland. Draw over your desktop while still seeing everything underneath.
 
-## Requirements (Arch / KDE)
+## Requirements (Arch / KDE / Hyprland)
 
 System packages:
 
@@ -10,7 +10,18 @@ System packages:
 sudo pacman -S python python-gobject python-cairo gtk3 gtk-layer-shell libayatana-appindicator
 ```
 
+`gtk-layer-shell` provides the `GtkLayerShell 0.1` typelib the overlay needs.
 `libayatana-appindicator` (or `libappindicator`) enables the system tray icon.
+
+Glassboard needs a Python that can `import gi` from the system packages. If your
+default `python3` comes from mise / pyenv / asdf it will not see PyGObject, so
+build the venv from the distro interpreter instead:
+
+```bash
+/usr/bin/python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -e .
+```
+
 ## Run
 
 ```bash
@@ -18,11 +29,10 @@ cd /path/to/glassboard
 python -m glassboard
 ```
 
-Or after an editable install:
+Or after an editable install (see above):
 
 ```bash
-pip install -e .
-glassboard
+.venv/bin/glassboard
 ```
 
 ### App menu (desktop entry)
@@ -31,9 +41,12 @@ A `glassboard.desktop` file is included. To install it for your user:
 
 ```bash
 install -Dm644 glassboard.desktop ~/.local/share/applications/glassboard.desktop
-# edit Path= in that file if the repo is not at /path/to/glassboard
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```
+
+It runs the `glassboard` console script, so make sure the environment that owns
+it is activated or that its `bin/` directory is on `PATH` (for the venv above,
+`ln -s "$PWD/.venv/bin/glassboard" ~/.local/bin/glassboard`).
 
 Then launch **Glassboard** from your app menu / launcher.
 
@@ -66,4 +79,4 @@ Pinning that entry to the taskbar is fine: Glassboard is a single-instance app, 
   - `Ctrl+Z` undo, `Ctrl+Backspace` clear
   - `Esc` retract Board, else back to Click, else hide to tray (or quit if no tray)
 
-Tested against KWin Wayland with `wlr-layer-shell`.
+Tested against KWin Wayland and Hyprland (Omarchy) with `wlr-layer-shell`.

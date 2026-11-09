@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Glassboard
+GenericName=Overlay Whiteboard
+Comment=Draw on a transparent overlay above your desktop
+Exec=glassboard
+Icon=applications-graphics
+Terminal=false
+StartupNotify=false
+Categories=Graphics;
+Keywords=whiteboard;draw;annotate;overlay;
